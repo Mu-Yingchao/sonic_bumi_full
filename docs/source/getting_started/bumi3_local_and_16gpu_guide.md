@@ -3,6 +3,9 @@
 本文只描述当前仓库的 BUMI3 原生 SONIC 路径。旧 `gear_sonic_deploy` 的 G1 C++
 DDS/CSV 三终端流程不是当前 BUMI3 sim2sim 入口，不能混用按键和观测约定。
 
+本地 VSCode/Codex 作为控制中枢、GitHub 作为代码唯一真源、多节点作为计算端的完整
+可复用规范见 `codex_local_control_multi_node_training.md`。
+
 ## 1. 代码一致性规则
 
 Git commit 是唯一代码版本标识。算法、配置、资产或部署代码只能先在开发机修改、测试、
