@@ -948,7 +948,8 @@ def _run_environment_smoke(args, simulation_app) -> None:  # noqa: ARG001
         f"manager_env.commands.motion.motion_lib_cfg.motion_file={args.motion_file}",
         f"manager_env.commands.motion.motion_lib_cfg.smpl_motion_file={args.smpl_motion_file}",
     ]
-    cfg = _compose_config(EXP_NAME, overrides)
+    exp_name = GROUND_FINETUNE_EXP_NAME if args.ground_finetune else EXP_NAME
+    cfg = _compose_config(exp_name, overrides)
     env_cfg = custom_instantiate(cfg.manager_env)
     env_cfg.seed = cfg.seed
     env_cfg.sim.device = args.device
@@ -981,6 +982,11 @@ def _parse_args():
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--smoke", action="store_true", help="创建 Isaac Lab 环境并 reset/step")
+    parser.add_argument(
+        "--ground-finetune",
+        action="store_true",
+        help="smoke 使用低姿态/地面接触微调配置；不加时使用 scratch baseline",
+    )
     parser.add_argument("--motion-file", type=Path, help="已有 BUMI3 robot motion 文件或目录")
     parser.add_argument("--smpl-motion-file", type=Path, help="已有且配对的 SMPL motion 路径")
     parser.add_argument("--num-envs", type=int, default=1, help="smoke 环境数量，默认 1")
