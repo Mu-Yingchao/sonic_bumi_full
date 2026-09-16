@@ -3924,3 +3924,224 @@ tmux new-session -d -s tensorboard_bumi3_three_source \
 - 本轮未启动 Isaac Lab GUI、未重训、未进行人工 GUI 或实机验收；训练函数数值一致性、MuJoCo 动力学及键盘队列路径为已执行检查。原8卡训练在同步前 PID/启动 tick/cwd/命令均与上轮一致，服务器同分支 HEAD 6ba4ef3，工作区干净。
 - 功能提交 `a7592c9ea9b713809de44de5214547ca62d5b4ee` 已推送 GitHub 当前分支；noetix-volc 同分支通过 `git pull --ff-only` 从 6ba4ef3 快进到该提交，工作区干净。5 个相关 Python 文件静态编译通过，相关源码及 XML/YAML 指纹与本地一致。同步前后 launcher 3269510（start_ticks=964046165）和八个 worker 3269523～3269530（start_ticks=964046505）的 PID、启动 tick、cwd 和完整命令逐项完全一致，输出 `SERVER_SMPL_ENTRY_SYNC_PASS`。后续仅追加审计记录，不改变已经验证的实现。
 - 测试与传输关键证据已归档后，确认本线程执行进程结束，并检查可读进程的 cmdline/cwd/fd 无目录引用，仅清理精确专用目录 `/tmp/bumi-smpl-entry-20260910-uIz0Bc`（158 文件，618252 bytes），输出 `TASK_TEMP_CLEANUP_PASS`。正式十对数据、旧五对、模型、测试源码和用户 g1.tar.gz 保留。该临时路径此后仅作历史来源记录。
+
+## 2026-09-16：地面接触专项微调——补记配置审计、修复启动器静默失败并正式启动 100k 微调
+
+### 1. 起点、授权范围与背景
+
+- 所属分支 `main`，起始 HEAD `b0b1ace77ff1993519b64a7d6c06bb65ec54aca6`，与 origin 一致，工作区干净。
+- 用户在会话开始时已完成以下工作，但**未同步写入本记录**（违反本文件 §开头及 `agent.md` 第 1 条），本节先补记这部分内容，再记录本轮新增修改：
+  - 提交 `1af2ea0`：新增地面接触专项微调配置
+    `gear_sonic/config/exp/manager/universal_token/all_modes/sonic_bumi3_ground_finetune.yaml`，
+    新增奖励函数 `reference_conditioned_undesired_contacts`
+    （`gear_sonic/envs/manager_env/mdp/rewards.py`），新增
+    `tools_local/bumi_cluster.sh` 的 `launch-ground-finetune` /
+    `remote-ground-node` 入口及 `tools_local/bumi_cluster.env.example` 的
+    `GROUND_FINETUNE_*` 样例字段。
+  - 提交 `dcf83c9`：修正微调配置 `defaults` 中父配置引用路径。
+  - 提交 `732b9ea`：`validate_bumi3_integration.py` 增加
+    `--ground-finetune` smoke 开关。
+  - 提交 `b0b1ace`：`validate_bumi3_integration.py` 同步接触参数校验期望值。
+  - 提交 `f05d813`：把 `remote_start`/`remote_ground_start` 的 tmux 启动方式从
+    `cd REPO && ... tmux new-session -d -s NAME bash -lc INNER` 改为
+    `tmux new-session -d -s NAME -c REPO INNER`，用户称此举修复了此前定位到的
+    "嵌套 tmux → bash -lc 命令层" 零日志问题，随后仅做了一次使用旧
+    `sonic_bumi3`（非微调）配置、64 envs/GPU、5 iteration 的冒烟
+    （`launch-smoke`），**未实际跑通 `launch-ground-finetune` 这条新入口**
+    即计划直接启动 100k 正式微调。
+- 用户本轮指令：核对上述工作的实际效果与进度，若发现问题或"思维混乱"可按其
+  微调方案重做，确认无误后启动两台服务器共 16 卡、100,000 iteration 的
+  低姿态/地面接触专项微调。
+
+### 2. 配置语义审计结论
+
+逐项核对 `sonic_bumi3_ground_finetune.yaml` 相对基线 `sonic_bumi3.yaml` 的
+偏移是否真的只影响低姿态（参考根高 < 0.40 m）场景：
+
+- **接触惩罚**（`reference_conditioned_undesired_contacts`）：正确按
+  `command.anchor_pos_w[:, 2] < low_reference_height` 门控，且门控用的是
+  **参考**高度而非机器人自身高度（避免策略靠主动摔倒规避惩罚）。符合预期。
+- **`anchor_pos`／`ee_body_pos` 终止阈值放宽**：两者对应的函数
+  `exceeded_anchor_height`／`exceeded_body_height`
+  （`gear_sonic/envs/manager_env/mdp/terminations.py:97,206`）原生支持
+  `threshold_adaptive + down_threshold + root_height_threshold`，微调配置只
+  改了 `down_threshold`（0.25→0.40、0.40→0.50），**确认只在参考根高过低时生效**，
+  符合"仅放宽低姿态"的表述。
+- **`anchor_ori_full`／`foot_pos_xyz` 终止阈值放宽**：核查对应函数
+  `exceeded_anchor_ori`／`exceeded_body_pos`（同文件 160/182 行）后确认，
+  这两个函数**不支持任何按参考高度分档的参数**，只有一个全局
+  `threshold`。微调配置把 `anchor_ori_full.threshold` 从基线继承的 0.2
+  （来自 `terminations/tracking/base_adaptive_strict_ori_foot_xyz.yaml`）
+  放宽到 1.0（5 倍），把 `foot_pos_xyz.threshold` 从 0.20 放宽到 0.35，
+  **这两项实际对全部参考姿态（含站立、行走）生效，并非仅低姿态**。
+  `validate_bumi3_integration.py::_validate_resolved_configs` 已把这两个数值
+  锁定为断言期望值，说明是有意为之而非笔误，但配置文件注释
+  （"Upright thresholds remain inherited from the scratch baseline"）
+  与该实际效果不完全一致，可能造成后续误解。**本轮判断为已知设计取舍、
+  不阻塞本次启动**：定量影响仅由本节记录、留待后续用 TensorBoard 的
+  站立/行走 bin 内 reward、以及是否出现方向/落脚精度退化来复核；若观察到
+  普通动作精度下降，第一排查点是这两个全局阈值，修复方式是仿照
+  `exceeded_anchor_height` 的模式给 `exceeded_anchor_ori`/`exceeded_body_pos`
+  增加按参考高度分档的可选参数，而非简单调回原阈值。
+- **学习率**：`actor_learning_rate` 2e-5→1e-5、`critic_learning_rate`
+  1e-3→5e-4，与用户所述"减半"完全一致。
+- **困难采样与 quarantine**：基线 `uniform_sampling_rate=0.9`（10% 困难），
+  微调改为 `0.20`（80% 困难）；`quarantine.enable` 由 `true` 改为
+  `false`，`dynamics_gate.enable` 保持 `true`（不受影响）。均与用户描述一致，
+  且已在下述真实冒烟的 TensorBoard 风格指标行中核实
+  `Env/adp_samp/quarantined_motions` 全程为 0。
+- **checkpoint 加载语义**：`gear_sonic/train_agent_trl.py` 的
+  `resume_checkpoint()` 只设置 `config.checkpoint`，不改 `config.resume`；
+  `PPOTrainer.load_checkpoint(path, resume=False)`
+  （`gear_sonic/trl/trainer/ppo_trainer.py:2589`）在 `resume=False` 时只
+  加载 `actor_model_state_dict`/`value_state_dict`，跳过 optimizer、
+  lr_scheduler 与 `env_state_dict`（后者承载 adaptive sampling/quarantine
+  运行时状态）。`remote_ground_node` 固定传入 `+resume=false
+  checkpoint=$checkpoint`，与用户所述"仅加载网络权重、重置 optimizer 与
+  adaptive/quarantine 状态"完全一致。
+
+结论：配置语义基本正确，实现质量不是"思维混乱"，可以继续；但发现并记录了
+一项设计取舍（anchor_ori_full/foot_pos_xyz 全局放宽）供后续复核，以及下述
+两项必须先修的实际缺陷。
+
+### 3. 发现并修复的问题一：本机 `.local` 配置缺少专项微调的 iteration/env 数
+
+- `tools_local/bumi_cluster.sh::launch_ground_finetune` 用
+  `envs="${GROUND_FINETUNE_ENVS_PER_GPU:-4096}"`、
+  `iterations="${GROUND_FINETUNE_ITERATIONS:-50000}"` 取值，但本机真实
+  `.local/sonic_bumi_cluster.env`（Git 忽略，不在仓库版本控制范围）当时
+  **没有这两个字段**，只有样例文件 `tools_local/bumi_cluster.env.example`
+  里写了默认值 50000。若直接执行
+  `launch-ground-finetune`，会静默启动 50,000 iteration 而非用户要求的
+  100,000。
+- 修复：在本机 `.local/sonic_bumi_cluster.env` 追加
+  `GROUND_FINETUNE_ENVS_PER_GPU="4096"`、
+  `GROUND_FINETUNE_ITERATIONS="100000"`。该文件被 Git 忽略，此修改不产生
+  代码提交，仅本机生效；两台服务器不读取本机 `.local` 文件，不受影响。
+
+### 4. 发现并修复的问题二：tmux 内层 `exec` 导致启动器静默零日志（f05d813 的"修复"本身仍有 bug）
+
+- 现象：用 `launch-ground-finetune` 通过 tmux 正式入口启动后，两端 tmux
+  会话在 1 秒内消失，`node{0,1}.log` 始终 0 字节，且没有任何可诊断输出；
+  多次复现（包括 4096 envs/GPU 全量参数、64 envs/GPU 冒烟参数）现象完全一致。
+- 排查过程（均在 gpu14/gpu15 上实测，非本地推断）：
+  1. 直接用 `sh -c "$inner"`（不经 tmux）执行完全相同的内层命令：正常运行，
+     rank0 因缺少 rank1 伙伴而阻塞在 accelerate 分布式 rendezvous（符合预期，
+     非 bug）；rank1 单独执行时真实拉起 8 个 `accelerate`/`train_agent_trl.py`
+     worker 进程。证明内层命令字符串本身、`%q` 转义、路径解析均无问题。
+  2. 用 `tmux capture-pane`/`pipe-pane` 紧跟 `tmux new-session` 尝试捕获
+     pane 输出：均已 "can't find pane"，会话在毫秒级消失。
+  3. 最小复现矩阵（gpu14，tmux 3.2a，`default-shell` 确认为 `/bin/bash`）：
+     - `tmux new-session -c DIR "exec sleep 3"` → 存活。
+     - `tmux new-session -c DIR "exec bash -c 'sleep 3'"` → 存活。
+     - `tmux new-session -c DIR "exec bash tools_local/bumi_cluster.sh > log 2>&1 < /dev/null"`
+       （无子命令，应打印 usage 后 `exit 2`）→ 会话消失且 **log 为空**。
+     - 去掉 `exec`，同样无子命令的调用 → 会话消失（符合预期，命令执行完
+       tmux 关闭 pane 是正常行为），但 **log 正确写入了完整 usage 文本**。
+     - 交叉验证 "exec + 绝对路径" 与 "无 exec + 相对路径"：前者 log 为空，
+       后者 log 有内容，证明与相对/绝对路径无关，**唯一变量是 `exec`**。
+  4. 结论：在本项目服务器的 tmux 3.2a 上，`tmux new-session -c DIR
+     "exec CMD > LOG 2>&1 < /dev/null"` 这一模式会导致 `>` 重定向失效且
+     pane 立即消失，去掉 `exec`（让内层 `bash tools_local/bumi_cluster.sh
+     ...` 作为子进程而非替换进程镜像运行）后行为完全正常，重定向和会话
+     生命周期（命令结束即关闭）均符合预期。
+- 修复：提交 `b0c9547`，把 `remote_start`／`remote_ground_start`
+  （`tools_local/bumi_cluster.sh` 98-122 行）内层命令模板中的
+  `"exec bash tools_local/bumi_cluster.sh ..."` 改为
+  `"bash tools_local/bumi_cluster.sh ..."`，两处改法一致。`bash -n` 语法检查通过。
+- 兼容性边界：该 bug 存在于 `remote_start`（`launch-smoke`/`launch-train`）
+  与 `remote_ground_start`（`launch-ground-finetune`）共用的同一段代码，
+  修复方式相同；但**本轮只用 `launch-ground-finetune` 路径做了完整真实验证
+  （见 §5、§6），未重新验证 `launch-smoke`／`launch-train`**。用户此前报告的
+  一次"16 卡冒烟通过"发生在 f05d813 提交**之前**（仍是旧 `bash -lc` 实现），
+  不能作为 f05d813 之后、修复前的 `remote_start` 已验证的证据。
+
+### 5. 真实端到端冒烟验证（launch-ground-finetune，64 envs/GPU、5 iteration）
+
+- 提交 `b0c9547` 后先 `git bundle` 同步两台服务器到该 SHA（GitHub 直连
+  当前仍会超时，沿用"本地推 GitHub + SSH 传增量 bundle"方式，
+  `git fetch <bundle> <sha> && git merge --ff-only FETCH_HEAD`），
+  `bash tools_local/bumi_cluster.sh verify-code` 两端均 `CODE_OK`。
+- 用 `GROUND_FINETUNE_ENVS_PER_GPU=64 GROUND_FINETUNE_ITERATIONS=5
+  bash tools_local/bumi_cluster.sh launch-ground-finetune
+  bumi3_ground_finetune_smoke5_20260916
+  /data/ouqin/checkpoints/sonic_bumi3_base_100000.pt` 启动真实 16 卡冒烟，
+  checkpoint 与 §3449 节记录的同一份 100000 步 checkpoint 一致
+  （SHA-256 `2abb18d65d74c16c23cda3a9f535cdf60e762776f66e4a1748890b79920e5d1e`，
+  两端一致，本轮重新 `sha256sum` 复核）。
+- 实际输出关键证据：
+  - `[INFO] Termination Manager` 表格显示 5 个激活项
+    `time_out/anchor_pos/anchor_ori_full/ee_body_pos/foot_pos_xyz`，
+    `[INFO] Reward Manager` 表格显示 11 项含 `undesired_contacts`，
+    `policy` 观测 690 维、`critic` 1227 维、`tokenizer` 含 g1/smpl 双路，
+    与配置定义完全一致，证明 Hydra 组合在真实 Isaac Lab 运行时确实按
+    微调配置生效，不止是 `validate_bumi3_integration.py` 的静态断言。
+  - 两端各 8 个 worker 进程均打印
+    `Loading checkpoint from /data/ouqin/checkpoints/sonic_bumi3_base_100000.pt`
+    及 `Loaded checkpoint from step 100000`。
+  - 5 次 PPO 迭代全部完成：`Mean rewards` 依次约
+    -1.50 → -0.30 → 1.53 → 3.12 →（第 5 次未逐字记录但训练正常结束），
+    与用户此前旧配置冒烟报告的数值曲线高度吻合（同一份起始网络权重下的
+    合理复现）；`Total episodes: 5120`、`Total timesteps: 122880`、
+    `Iteration time: 2.51s`，与 5×24×1024 的理论步数一致。
+  - `Env/adp_samp/quarantined_motions: 0.0000`
+    （全程为 0，确认 `quarantine.enable=false` 生效）、
+    `Env/adp_samp/dynamics_gate_failed_motions: 23.0000`（dynamics_gate
+    仍按基线生效，未受微调配置影响，符合预期）。
+  - 全程无 `Traceback`／`CUDA out of memory`／`NCCL` 报错；rank1
+    （gpu15）日志出现两条 numpy
+    `RuntimeWarning: Mean of empty slice`／`invalid value encountered in
+    scalar divide`，判断为 64 envs/5 iteration 极小样本下某些统计 bin
+    为空的良性告警，非致命错误，**该现象未在 100k 正式规模下复现验证**，
+    留作已知风险项。
+- 冒烟专用运行目录（`bumi3_ground_finetune_{smoke,smoke2,smoke3,smoke5,captest*}*`、
+  `debug_direct_test{,2}`）与 `/tmp` 下调试日志已在确认无进程引用后清理
+  完毕，仅保留本节记录的关键证据；未清理任何非本线程产生的目录（如
+  `ground_smoke16_debug`、`sonic_bumi3_ground_smoke16_from100k_20260916_1200`
+  等疑似用户此前遗留的验证产物，本轮未触碰）。
+
+### 6. 正式启动：16 卡、100,000 iteration 地面接触专项微调
+
+- 冒烟通过、`.local` 配置修正、代码修复同步完成后，执行：
+  `bash tools_local/bumi_cluster.sh launch-ground-finetune
+  sonic_bumi3_ground_finetune_100k_20260916
+  /data/ouqin/checkpoints/sonic_bumi3_base_100000.pt`，
+  `launch_ground_finetune` 内部 `verify_code` 先确认两端均为 `CODE_OK
+  b0c95477ac01a3cb1535c03406fc3cb72e412c8e`，打印
+  `envs/GPU=4096, world=16, iterations=100000`，与用户要求完全一致。
+- 启动后持续监控约 6 分钟：GPU 显存从空闲 4 MiB 经场景/动作库构建阶段的
+  约 5.5～7.5 GiB，在 checkpoint 加载完成、进入真正训练迭代后跃升至约
+  15～15.7 GiB／卡（16 张卡全部如此，`nvidia-smi` 两端逐一核实），
+  两端 `Loading checkpoint`／`Loaded checkpoint from step 100000`
+  各自打印 8 次（对应每节点 8 张卡各一个 worker 进程），随后
+  `Learning iteration` 计数持续增长（记录时已到第 6 次），两端 tmux
+  会话 `sonic_sonic_bumi3_ground_finetune_100k_20260916_node{0,1}`
+  均存活，无 `Traceback`／`CUDA out of memory`／`NCCL` 报错。
+- 训练数据来源：`ROBOT_MOTION_DIR=/data/ouqin/datasets/bumi3/train/robot`、
+  `SMPL_MOTION_DIR=/data/ouqin/datasets/bumi3/train/smpl`（与基线训练同一
+  份完整 97,660 条数据集，未做任何裁剪，`exclude_motion_keys=[]`），符合
+  用户"仍使用完整数据集，保留 standing/walking replay"的要求。
+- 训练产物与监控：`RUN_ROOT/sonic_bumi3_ground_finetune_100k_20260916/`
+  下 `node{0,1}.log`、checkpoint 由 rank0（gpu14）负责写入；后续查看训练
+  状态用 `bash tools_local/bumi_cluster.sh training-status
+  sonic_bumi3_ground_finetune_100k_20260916`，TensorBoard 走 §9.3 描述的
+  SSH 端口转发方式，本轮未额外新建转发隧道。
+
+### 7. 未执行项、已知风险与回滚
+
+- 未执行：`launch-smoke`／`launch-train`（非微调路径）在 exec 修复后的
+  重新验证；100k 正式规模下是否复现 §5 提到的 numpy 空切片告警；
+  anchor_ori_full/foot_pos_xyz 全局放宽对普通站立/行走动作精度的定量影响
+  （需等待正式训练产出足够 TensorBoard 数据后按 bin 复核，见 §2）。
+- 已知风险：若后续观察到普通动作追踪精度相对基线 100k 明显退化，应优先
+  复查 §2 提到的 `anchor_ori_full`/`foot_pos_xyz` 全局阈值放宽，而非默认
+  归因于学习率或采样策略。
+- 回滚方法：训练层面——`training-status` 显示异常或需要终止时，
+  按 §11 故障处理边界（本文件前述章节）在 tmux 会话内正常终止训练进程，
+  不使用 `git reset --hard`/`kill -9` 以外的破坏性手段；代码层面——本轮
+  两个提交（`b0c9547` 修复 `exec` bug）均为独立小提交，如需回滚，创建新的
+  反向提交撤销 `tools_local/bumi_cluster.sh` 的两处 `exec` 前缀改动即可，
+  不影响 `1af2ea0`～`b0b1ace` 引入的微调配置本身。
+- 交付确认：本地、GitHub（`git push origin main`）、gpu14、gpu15 均已同步到
+  `b0c95477ac01a3cb1535c03406fc3cb72e412c8e`；`sonic_bumi3_ground_finetune_100k_20260916`
+  训练已在两端以 tmux 会话形式持续运行，未依赖任何前台 SSH 连接。
