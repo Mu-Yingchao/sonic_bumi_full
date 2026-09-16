@@ -4,7 +4,7 @@
 # exactly reproducible.
 
 defaults:
-  - sonic_bumi3
+  - /exp/manager/universal_token/all_modes/sonic_bumi3
   - _self_
 
 exp_var: ground_finetune
