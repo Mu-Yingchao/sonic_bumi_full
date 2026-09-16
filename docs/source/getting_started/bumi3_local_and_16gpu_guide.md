@@ -147,25 +147,32 @@ models/deployment/robot/model_step_030000.onnx
 models/deployment/robot/model_step_050000.onnx
 models/deployment/robot/model_step_064000_robot.onnx
 models/deployment/robot/model_step_086000.onnx
+models/deployment/robot/model_step_098000.onnx
+models/deployment/robot/model_step_100000.onnx
 models/deployment/smpl/model_step_030000.onnx
 models/deployment/smpl/model_step_050000.onnx
 models/deployment/smpl/model_step_064000_smpl.onnx
 models/deployment/smpl/model_step_086000.onnx
+models/deployment/smpl/model_step_098000.onnx
+models/deployment/smpl/model_step_100000.onnx
 ```
 
-当前最新综合候选为 86000-step，Robot 与 SMPL 测试可分别执行：
+正式训练已完成到 100000-step。100000 的累计 global motion failure fraction 为
+`0.1419`，低于 98000 的约 `0.1428`；本地同条件对照中，98000 在
+`kneeling_start` 两路倒塌，而 100000 保持稳定。因此当前默认综合候选为 100000，
+Robot 与 SMPL 测试可分别执行：
 
 ```bash
 cd /home/yingchaomu/下载/sonic_bumi_full
 source .venv_sim/bin/activate
 tools_local/run_bumi3_sim2sim_nvidia.sh \
   --encoder robot \
-  --policy models/deployment/robot/model_step_086000.onnx \
+  --policy models/deployment/robot/model_step_100000.onnx \
   --motion data/bumi3_sim2sim_test/robot/wave_R_001__A428.pkl
 
 tools_local/run_bumi3_sim2sim_nvidia.sh \
   --encoder smpl \
-  --policy models/deployment/smpl/model_step_086000.onnx \
+  --policy models/deployment/smpl/model_step_100000.onnx \
   --motion data/bumi3_sim2sim_test/smpl/wave_R_001__A428.pkl \
   --robot-motion data/bumi3_sim2sim_test/robot/wave_R_001__A428.pkl
 ```
@@ -176,14 +183,14 @@ tools_local/run_bumi3_sim2sim_nvidia.sh \
 ```bash
 python gear_sonic/scripts/run_bumi3_sim2sim.py \
   --encoder robot \
-  --policy models/deployment/robot/model_step_086000.onnx \
+  --policy models/deployment/robot/model_step_100000.onnx \
   --motion data/bumi3_sim2sim_test/robot/wave_R_001__A428.pkl \
   --headless --no-real-time --duration 10
 ```
 
-86000 的 wave 无窗口验收两路均完整运行 500/500 帧，最低根高度分别为
-Robot `0.4572 m`、SMPL `0.4493 m`。深蹲轨迹两路最低根高度均为
-`0.2566 m`，说明髋膝活动范围没有被部署端普遍锁死。
+100000 的 wave 无窗口验收两路均完整运行 500/500 帧，最低根高度分别为
+Robot `0.4569 m`、SMPL `0.4544 m`。深蹲轨迹最低根高度分别为 Robot
+`0.2516 m`、SMPL `0.2566 m`，说明髋膝活动范围没有被部署端普遍锁死。
 
 真正跪地仍未通过。训练集包含 76 条名称明确的 kneeling Robot 动作，本地已保留
 以下三对运行测试数据（这些运行数据仍由 Git 忽略）：
@@ -194,7 +201,7 @@ data/bumi3_sim2sim_test/kneeling/{robot,smpl}/kneeling_loop_003__A040.pkl
 data/bumi3_sim2sim_test/kneeling/{robot,smpl}/kneeling_stop_003__A049.pkl
 ```
 
-86000 的 start 轨迹能够下降但没有完整复现跪姿，loop/stop 在膝地接触阶段会倒塌，
+100000 的 start 轨迹没有倒塌但也没有完整复现跪姿，loop/stop 在膝地接触阶段仍会倒塌，
 Robot 与 SMPL 表现一致。当前证据将问题限定为策略对膝地接触的鲁棒性或
 Isaac Lab/MuJoCo 接触与碰撞差异，而非 GPU 渲染、关节映射或 PICO 独有问题。
 下一步需要在 Isaac Lab play 中用同一 motion/checkpoint 对照，再比较两端膝、脚
@@ -472,7 +479,7 @@ python -c "import xrobotoolkit_sdk; print('XRT_IMPORT_OK')"
 
 ```bash
 tools_local/run_bumi3_pico_sim2sim_nvidia.sh \
-  --policy models/deployment/smpl/model_step_086000.onnx \
+  --policy models/deployment/smpl/model_step_100000.onnx \
   --zmq-url tcp://127.0.0.1:5556 \
   --startup-timeout 300 \
   --stream-timeout 0.5

@@ -8,15 +8,19 @@
 ```bash
 cd /home/yingchaomu/下载/sonic_bumi_full
 test -x .venv_sim/bin/python
-ls -lh models/deployment/robot/model_step_086000.onnx
-ls -lh models/deployment/smpl/model_step_086000.onnx
-sha256sum models/deployment/{robot,smpl}/model_step_086000.onnx
+ls -lh models/deployment/robot/model_step_100000.onnx
+ls -lh models/deployment/smpl/model_step_100000.onnx
+sha256sum models/deployment/{robot,smpl}/model_step_100000.onnx
 ```
 
 期望 SHA-256：Robot 为
-`655931bfcd14c24feb691771df298c7d0faee64a9be06286ce1cdb0e86d7ae57`，
+`52d3f5d26a4434aae7c73747a7d88756421a64c879ecf110ebcc5a9c4a4db659`，
 SMPL 为
-`36351b394bc78945a2acd7df291f4beca38e6d928a33776c001391706acbdf39`。
+`5bc9a8ea6624bb64a0e356f68cbd3f5dc9d4316fc63afc4c441904c621df6985`。
+
+训练已完成到 100000。另保留 98000 对照策略：Robot SHA-256 为
+`01e5ff9e540b75d1c1db7967343cbc75949092cb9adb3afb549680e05da9e041`，
+SMPL 为 `303ac4d889a6a5d49e67e3c8a7edf8b4093064495b91f36362a74f8f048fcd8e`。
 
 本机普通 Python 启动 MuJoCo 会落到 CPU 的 `llvmpipe`。所有带窗口的 MuJoCo
 命令必须使用 `tools_local/*_nvidia.sh` 启动器。
@@ -40,7 +44,7 @@ cd /home/yingchaomu/下载/sonic_bumi_full
 
 tools_local/run_bumi3_sim2sim_nvidia.sh \
   --encoder robot \
-  --policy models/deployment/robot/model_step_086000.onnx \
+  --policy models/deployment/robot/model_step_100000.onnx \
   --motion data/bumi3_sim2sim_test/robot/wave_R_001__A428.pkl
 ```
 
@@ -49,7 +53,7 @@ tools_local/run_bumi3_sim2sim_nvidia.sh \
 ```bash
 tools_local/run_bumi3_sim2sim_nvidia.sh \
   --encoder robot \
-  --policy models/deployment/robot/model_step_086000.onnx \
+  --policy models/deployment/robot/model_step_100000.onnx \
   --dataset data/bumi3_sim2sim_test/original_split_5217_seen_by_current_run/dataset_smoke_24.json
 ```
 
@@ -64,12 +68,12 @@ tools_local/run_bumi3_sim2sim_nvidia.sh \
 ```bash
 tools_local/run_bumi3_sim2sim_nvidia.sh \
   --encoder robot \
-  --policy models/deployment/robot/model_step_086000.onnx \
+  --policy models/deployment/robot/model_step_100000.onnx \
   --motion data/bumi3_sim2sim_test/original_split_5217_seen_by_current_run/robot/230119/idle_crouch_right_loop_101__A127.pkl
 ```
 
-86000 Robot policy 的无窗口实测最低根高度为 `0.2566 m`、最大膝屈曲为
-`1.9717 rad`；SMPL policy 分别为 `0.2566 m`、`1.9032 rad`。这证明机械
+100000 Robot policy 的无窗口实测最低根高度为 `0.2516 m`、最大膝屈曲为
+`2.1008 rad`；SMPL policy 分别为 `0.2566 m`、`2.0247 rad`。这证明机械
 限位和部署物理不会普遍禁止深蹲，但不等于能完成膝盖着地。
 
 本地已从服务器训练集取回三对真正的 kneeling 轨迹。Robot 起跪测试：
@@ -77,7 +81,7 @@ tools_local/run_bumi3_sim2sim_nvidia.sh \
 ```bash
 tools_local/run_bumi3_sim2sim_nvidia.sh \
   --encoder robot \
-  --policy models/deployment/robot/model_step_086000.onnx \
+  --policy models/deployment/robot/model_step_100000.onnx \
   --motion data/bumi3_sim2sim_test/kneeling/robot/kneeling_start_001__A037.pkl
 ```
 
@@ -86,14 +90,14 @@ SMPL 起跪测试：
 ```bash
 tools_local/run_bumi3_sim2sim_nvidia.sh \
   --encoder smpl \
-  --policy models/deployment/smpl/model_step_086000.onnx \
+  --policy models/deployment/smpl/model_step_100000.onnx \
   --motion data/bumi3_sim2sim_test/kneeling/smpl/kneeling_start_001__A037.pkl \
   --robot-motion data/bumi3_sim2sim_test/kneeling/robot/kneeling_start_001__A037.pkl
 ```
 
 当前诊断结果不是“没有 kneeling 数据”：训练集有 76 条文件名明确包含 kneeling
-的 Robot 动作。86000 的 `kneeling_start` 两路都能下降但没有完整复现跪姿；
-`kneeling_loop_003__A040` 和 `kneeling_stop_003__A049` 两路都会在接触阶段倒塌，
+的 Robot 动作。100000 的 `kneeling_start` 两路都保持站立稳定但没有完整复现跪姿；
+`kneeling_loop_003__A040` 和 `kneeling_stop_003__A049` 两路仍会在接触阶段倒塌，
 最低根高度约 `0.05 m`。因此真正跪地目前仍未通过，范围已缩小到策略对膝地接触
 的鲁棒性或 Isaac Lab 到 MuJoCo 的接触/碰撞差异；不是 GPU 渲染、关节映射或
 PICO 独有问题。下一步应在 Isaac Lab play 中播放同一条 kneeling，再逐项比较膝、
@@ -108,7 +112,7 @@ cd /home/yingchaomu/下载/sonic_bumi_full
 
 tools_local/run_bumi3_sim2sim_nvidia.sh \
   --encoder smpl \
-  --policy models/deployment/smpl/model_step_086000.onnx \
+  --policy models/deployment/smpl/model_step_100000.onnx \
   --motion data/bumi3_sim2sim_test/smpl/wave_R_001__A428.pkl \
   --robot-motion data/bumi3_sim2sim_test/robot/wave_R_001__A428.pkl
 ```
@@ -121,7 +125,7 @@ Robot 配对文件只负责一致的初始状态和红色参考影子；1470 维
 ```bash
 tools_local/run_bumi3_sim2sim_nvidia.sh \
   --encoder smpl \
-  --policy models/deployment/smpl/model_step_086000.onnx \
+  --policy models/deployment/smpl/model_step_100000.onnx \
   --dataset data/bumi3_sim2sim_test/original_split_5217_seen_by_current_run/dataset_smoke_24.json
 ```
 
@@ -139,7 +143,7 @@ cd /home/yingchaomu/下载/sonic_bumi_full
 mkdir -p models/checkpoints
 
 scp -i ~/.ssh/id_ed25519_sonic_bumi -P 22115 \
-  ouqin@117.161.121.54:/data/ouqin/runs/sonic_bumi3_16gpu_4096_scratch_100k_20260911_150534/model_step_086000.pt \
+  ouqin@117.161.121.54:/data/ouqin/runs/sonic_bumi3_16gpu_4096_scratch_100k_20260911_150534/model_step_100000.pt \
   models/checkpoints/
 ```
 
@@ -152,7 +156,7 @@ source /绝对路径/isaaclab环境/bin/activate
 export OMNI_KIT_ACCEPT_EULA=YES
 
 python gear_sonic/eval_agent_trl.py \
-  checkpoint="$PWD/models/checkpoints/model_step_086000.pt" \
+  checkpoint="$PWD/models/checkpoints/model_step_100000.pt" \
   ++headless=false ++num_envs=1 ++use_encoder=g1 \
   ++manager_env.observations.policy.enable_corruption=false \
   ++manager_env.observations.tokenizer.enable_corruption=false \
@@ -174,7 +178,7 @@ SMPL Encoder play 只把 `++use_encoder=g1` 改成：
 ## 5. SMPL + PICO 五点遥操 sim-to-sim
 
 这条链路不使用 planner/hybrid encoder，直接使用
-`model_step_086000.onnx`。PICO 端将头、双手、双脚五点人体跟踪解算成
+`model_step_100000.onnx`。PICO 端将头、双手、双脚五点人体跟踪解算成
 SMPL，并发布 10 个连续 50 Hz 帧；BUMI3 端以约 180 ms 缓冲延迟获得训练所需的
 10 帧窗口，生成 780 维 SMPL token，与 690 维本体历史组成 1470 维输入。
 这约 180 ms 是用真实连续历史帧代替训练端 future window 的显式缓冲，不是
@@ -234,7 +238,7 @@ python gear_sonic/scripts/pico_manager_thread_server.py \
 cd /home/yingchaomu/下载/sonic_bumi_full
 
 tools_local/run_bumi3_pico_sim2sim_nvidia.sh \
-  --policy models/deployment/smpl/model_step_086000.onnx \
+  --policy models/deployment/smpl/model_step_100000.onnx \
   --zmq-url tcp://127.0.0.1:5556 \
   --startup-timeout 300 \
   --stream-timeout 0.5
