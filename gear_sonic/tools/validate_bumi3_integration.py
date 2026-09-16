@@ -70,7 +70,7 @@ EXPECTED_LOCAL_URDF_SHA256 = (
     "0e08c15fe2226fedeac967c06a7910701935fc6de8fca2d4664a76c9ac41e955"
 )
 EXPECTED_LOCAL_MJCF_SHA256 = (
-    "1ef8da2e76be03430ba7f022e49309f194a289174db0275d7d3a123197cac3e3"
+    "5c0dc04bb4076ff2715e0b18dea43ffc7ede7ca40cda66a611a87b90bc2d1b7a"
 )
 EXPECTED_LOCAL_MESH_BUNDLE_SHA256 = (
     "5d84767fbd21ec22434c1cba8145e4887d4f5910512d5a8efeac50781f3afa26"
@@ -211,11 +211,22 @@ def _validate_mjcf_collision_policy(mjcf_root: ET.Element) -> None:
     assert collision_default.attrib == {
         "contype": "1",
         "conaffinity": "0",
-        "condim": "3",
+        "condim": "6",
         "group": "3",
         "density": "0",
-        "friction": "1 0.005 0.0001",
+        "friction": "1 0.05 0.01",
+        "solref": "0.01 1",
+        "solimp": "0.9 0.95 0.001",
         "rgba": "0 0 0 0",
+    }
+
+    option = mjcf_root.find("./option")
+    assert option is not None
+    assert option.attrib == {
+        "iterations": "80",
+        "solver": "Newton",
+        "cone": "elliptic",
+        "impratio": "10",
     }
 
     ground = mjcf_root.find("./worldbody/geom[@name='ground']")
@@ -223,8 +234,10 @@ def _validate_mjcf_collision_policy(mjcf_root: ET.Element) -> None:
     assert _parse_vector(ground.attrib["pos"]) == (0.001, 0.0, 0.0)
     assert ground.attrib["contype"] == "0"
     assert ground.attrib["conaffinity"] == "1"
-    assert ground.attrib["condim"] == "3"
-    assert ground.attrib["friction"] == "1 0.005 0.0001"
+    assert ground.attrib["condim"] == "6"
+    assert ground.attrib["friction"] == "1 0.05 0.01"
+    assert ground.attrib["solref"] == "0.01 1"
+    assert ground.attrib["solimp"] == "0.9 0.95 0.001"
 
     body_nodes = {
         node.attrib["name"]: node for node in mjcf_root.findall(".//body")
