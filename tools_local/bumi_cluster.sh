@@ -98,7 +98,7 @@ remote_start() {
   local inner remote_cmd session_name
   session_name="sonic_${run_id}_node${rank}"
   printf -v inner \
-    "exec bash tools_local/bumi_cluster.sh remote-node %q %q %q %q %q %q > %q 2>&1 < /dev/null" \
+    "bash tools_local/bumi_cluster.sh remote-node %q %q %q %q %q %q > %q 2>&1 < /dev/null" \
     "$rank" "$run_id" "$envs" "$iterations" "$robot_dir" "$smpl_dir" "$RUN_ROOT/$run_id/node${rank}.log"
   printf -v remote_cmd \
     "mkdir -p %q && command -v tmux >/dev/null && ! tmux has-session -t %q 2>/dev/null && tmux new-session -d -s %q -c %q %q && echo STARTED_TMUX:%q" \
@@ -113,7 +113,7 @@ remote_ground_start() {
   local inner remote_cmd session_name
   session_name="sonic_${run_id}_node${rank}"
   printf -v inner \
-    "exec bash tools_local/bumi_cluster.sh remote-ground-node %q %q %q %q %q %q %q > %q 2>&1 < /dev/null" \
+    "bash tools_local/bumi_cluster.sh remote-ground-node %q %q %q %q %q %q %q > %q 2>&1 < /dev/null" \
     "$rank" "$run_id" "$envs" "$iterations" "$robot_dir" "$smpl_dir" "$checkpoint" \
     "$RUN_ROOT/$run_id/node${rank}.log"
   printf -v remote_cmd \
