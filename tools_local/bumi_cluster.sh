@@ -101,8 +101,8 @@ remote_start() {
     "exec bash tools_local/bumi_cluster.sh remote-node %q %q %q %q %q %q > %q 2>&1 < /dev/null" \
     "$rank" "$run_id" "$envs" "$iterations" "$robot_dir" "$smpl_dir" "$RUN_ROOT/$run_id/node${rank}.log"
   printf -v remote_cmd \
-    "cd %q && mkdir -p %q && command -v tmux >/dev/null && ! tmux has-session -t %q 2>/dev/null && tmux new-session -d -s %q bash -lc %q && echo STARTED_TMUX:%q" \
-    "$REMOTE_REPO" "$RUN_ROOT/$run_id" "$session_name" "$session_name" "$inner" "$session_name"
+    "mkdir -p %q && command -v tmux >/dev/null && ! tmux has-session -t %q 2>/dev/null && tmux new-session -d -s %q -c %q %q && echo STARTED_TMUX:%q" \
+    "$RUN_ROOT/$run_id" "$session_name" "$session_name" "$REMOTE_REPO" "$inner" "$session_name"
   # Provisioning copies a machine-local config to REMOTE_REPO/.local on both nodes.
   ssh_node "$node" "$remote_cmd"
 }
@@ -117,8 +117,8 @@ remote_ground_start() {
     "$rank" "$run_id" "$envs" "$iterations" "$robot_dir" "$smpl_dir" "$checkpoint" \
     "$RUN_ROOT/$run_id/node${rank}.log"
   printf -v remote_cmd \
-    "cd %q && mkdir -p %q && command -v tmux >/dev/null && ! tmux has-session -t %q 2>/dev/null && tmux new-session -d -s %q bash -lc %q && echo STARTED_TMUX:%q" \
-    "$REMOTE_REPO" "$RUN_ROOT/$run_id" "$session_name" "$session_name" "$inner" "$session_name"
+    "mkdir -p %q && command -v tmux >/dev/null && ! tmux has-session -t %q 2>/dev/null && tmux new-session -d -s %q -c %q %q && echo STARTED_TMUX:%q" \
+    "$RUN_ROOT/$run_id" "$session_name" "$session_name" "$REMOTE_REPO" "$inner" "$session_name"
   ssh_node "$node" "$remote_cmd"
 }
 
