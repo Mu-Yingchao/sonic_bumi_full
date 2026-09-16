@@ -40,6 +40,9 @@ URDF_PATH = ASSET_ROOT / "urdf/bumi3/bumi.urdf"
 MJCF_PATH = ASSET_ROOT / "mjcf/bumi3.xml"
 MESH_DIR = ASSET_ROOT / "meshes/bumi3"
 EXP_NAME = "manager/universal_token/all_modes/sonic_bumi3"
+GROUND_FINETUNE_EXP_NAME = (
+    "manager/universal_token/all_modes/sonic_bumi3_ground_finetune"
+)
 EXPECTED_BUMI3_MUJOCO_DOF_NAMES = [
     "waist_yaw_joint",
     "l_arm_pitch_joint",
@@ -661,6 +664,32 @@ def _validate_resolved_configs() -> dict[str, int | float]:
         "min_new_motion_episodes": 3.0,
         "consecutive_evaluations": 3,
     }
+
+    ground_cfg = _compose_config(GROUND_FINETUNE_EXP_NAME)
+    ground_manager = _resolved_section(ground_cfg, "manager_env")
+    ground_algo = _resolved_section(ground_cfg, "algo")
+    ground_rewards = ground_manager["rewards"]
+    ground_terminations = ground_manager["terminations"]
+    ground_sampling = ground_manager["commands"]["motion"]["motion_lib_cfg"][
+        "adaptive_sampling"
+    ]
+
+    assert ground_rewards["undesired_contacts"]["func"] == (
+        "gear_sonic.envs.manager_env.mdp:reference_conditioned_undesired_contacts"
+    )
+    assert ground_rewards["undesired_contacts"]["params"]["command_name"] == "motion"
+    assert ground_rewards["undesired_contacts"]["params"]["low_reference_height"] == 0.40
+    assert ground_rewards["undesired_contacts"]["params"]["low_pose_penalty_scale"] == 0.0
+    assert ground_terminations["anchor_pos"]["params"]["threshold"] == 0.12
+    assert ground_terminations["anchor_pos"]["params"]["down_threshold"] == 0.40
+    assert ground_terminations["anchor_ori_full"]["params"]["threshold"] == 1.0
+    assert ground_terminations["foot_pos_xyz"]["params"]["threshold"] == 0.35
+    assert ground_terminations["ee_body_pos"]["params"]["down_threshold"] == 0.50
+    assert ground_sampling["uniform_sampling_rate"] == 0.20
+    assert ground_sampling["quarantine"]["enable"] is False
+    assert ground_sampling["dynamics_gate"]["enable"] is True
+    assert ground_algo["config"]["actor_learning_rate"] == 1.0e-5
+    assert ground_algo["config"]["critic_learning_rate"] == 5.0e-4
 
     return {
         "sim_dt": sim_dt,

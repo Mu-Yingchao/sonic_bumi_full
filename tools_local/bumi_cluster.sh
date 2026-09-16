@@ -16,7 +16,9 @@ Usage:
   tools_local/bumi_cluster.sh launch-nccl RUN_ID
   tools_local/bumi_cluster.sh launch-smoke RUN_ID
   tools_local/bumi_cluster.sh launch-train RUN_ID
+  tools_local/bumi_cluster.sh launch-ground-finetune RUN_ID CHECKPOINT
   tools_local/bumi_cluster.sh remote-node MACHINE_RANK RUN_ID ENVS ITERATIONS ROBOT_DIR SMPL_DIR
+  tools_local/bumi_cluster.sh remote-ground-node MACHINE_RANK RUN_ID ENVS ITERATIONS ROBOT_DIR SMPL_DIR CHECKPOINT
 
 All commands except the remote-* entry points run on the workstation.
 remote-node is invoked internally on each server.  The script never stores a password.
@@ -105,6 +107,21 @@ remote_start() {
   ssh_node "$node" "$remote_cmd"
 }
 
+remote_ground_start() {
+  local node="$1" rank="$2" run_id="$3" envs="$4" iterations="$5"
+  local robot_dir="$6" smpl_dir="$7" checkpoint="$8"
+  local inner remote_cmd session_name
+  session_name="sonic_${run_id}_node${rank}"
+  printf -v inner \
+    "exec bash tools_local/bumi_cluster.sh remote-ground-node %q %q %q %q %q %q %q > %q 2>&1 < /dev/null" \
+    "$rank" "$run_id" "$envs" "$iterations" "$robot_dir" "$smpl_dir" "$checkpoint" \
+    "$RUN_ROOT/$run_id/node${rank}.log"
+  printf -v remote_cmd \
+    "cd %q && mkdir -p %q && command -v tmux >/dev/null && ! tmux has-session -t %q 2>/dev/null && tmux new-session -d -s %q bash -lc %q && echo STARTED_TMUX:%q" \
+    "$REMOTE_REPO" "$RUN_ROOT/$run_id" "$session_name" "$session_name" "$inner" "$session_name"
+  ssh_node "$node" "$remote_cmd"
+}
+
 launch() {
   local mode="$1" run_id="$2" envs iterations robot_dir smpl_dir
   case "$mode" in
@@ -125,6 +142,27 @@ launch() {
   remote_start gpu15 1 "$run_id" "$envs" "$iterations" "$robot_dir" "$smpl_dir"
   remote_start gpu14 0 "$run_id" "$envs" "$iterations" "$robot_dir" "$smpl_dir"
   echo "Started $mode: run=$run_id, envs/GPU=$envs, world=16, iterations=$iterations"
+}
+
+launch_ground_finetune() {
+  local run_id="$1" checkpoint="$2"
+  local envs="${GROUND_FINETUNE_ENVS_PER_GPU:-4096}"
+  local iterations="${GROUND_FINETUNE_ITERATIONS:-50000}"
+  [[ "$run_id" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "Unsafe RUN_ID" >&2; exit 2; }
+  [[ "$checkpoint" == /* ]] || { echo "CHECKPOINT must be an absolute path" >&2; exit 2; }
+  verify_code
+  for node in gpu14 gpu15; do
+    ssh_node "$node" "test -s '$checkpoint'" || {
+      echo "$node missing checkpoint: $checkpoint" >&2
+      exit 1
+    }
+  done
+  echo "Starting ground-contact fine-tune rank 1 first; it will wait for rank 0."
+  remote_ground_start gpu15 1 "$run_id" "$envs" "$iterations" \
+    "$ROBOT_MOTION_DIR" "$SMPL_MOTION_DIR" "$checkpoint"
+  remote_ground_start gpu14 0 "$run_id" "$envs" "$iterations" \
+    "$ROBOT_MOTION_DIR" "$SMPL_MOTION_DIR" "$checkpoint"
+  echo "Started ground fine-tune: run=$run_id, checkpoint=$checkpoint, envs/GPU=$envs, world=16, iterations=$iterations"
 }
 
 remote_nccl_start() {
@@ -197,6 +235,42 @@ remote_node() {
     '++manager_env.commands.motion.motion_lib_cfg.exclude_motion_keys=[]'
 }
 
+remote_ground_node() {
+  local rank="$1" run_id="$2" envs="$3" iterations="$4"
+  local robot_dir="$5" smpl_dir="$6" checkpoint="$7"
+  local experiment_dir="$RUN_ROOT/$run_id"
+  cd "$REMOTE_REPO"
+  [[ -x "$REMOTE_PYTHON" ]] || { echo "Python missing: $REMOTE_PYTHON" >&2; exit 1; }
+  [[ -s "$checkpoint" ]] || { echo "Checkpoint missing: $checkpoint" >&2; exit 1; }
+  [[ "${OMNI_KIT_ACCEPT_EULA:-NO}" == "YES" ]] || {
+    echo "NVIDIA Omniverse EULA has not been explicitly accepted" >&2
+    exit 1
+  }
+  [[ -d "$robot_dir" ]] || { echo "Robot data missing: $robot_dir" >&2; exit 1; }
+  [[ -d "$smpl_dir" ]] || { echo "SMPL data missing: $smpl_dir" >&2; exit 1; }
+  export TMPDIR="${ISAACLAB_TMPDIR:-$RUN_ROOT/.tmp/$USER/node$rank}"
+  mkdir -p "$TMPDIR"
+  export NCCL_SOCKET_IFNAME OMNI_KIT_ACCEPT_EULA
+  if [[ -n "${SITE_LIBRARY_DIR:-}" ]]; then
+    export LD_LIBRARY_PATH="$SITE_LIBRARY_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+  fi
+  export NCCL_IB_DISABLE="${NCCL_IB_DISABLE:-0}"
+  export OMP_NUM_THREADS="${OMP_NUM_THREADS:-4}"
+  if [[ -n "$NCCL_IB_HCA" ]]; then export NCCL_IB_HCA; fi
+  exec "$REMOTE_PYTHON" -m accelerate.commands.launch \
+    --multi_gpu --num_machines=2 --num_processes=16 \
+    --machine_rank="$rank" \
+    --main_process_ip="$MASTER_ADDR" --main_process_port="$MASTER_PORT" \
+    gear_sonic/train_agent_trl.py \
+    +exp=manager/universal_token/all_modes/sonic_bumi3_ground_finetune \
+    +resume=false "checkpoint=$checkpoint" auto_load_latest=false use_wandb=false headless=True \
+    "experiment_dir=$experiment_dir" "num_envs=$envs" \
+    "++algo.config.num_learning_iterations=$iterations" \
+    "++manager_env.commands.motion.motion_lib_cfg.motion_file=$robot_dir" \
+    "++manager_env.commands.motion.motion_lib_cfg.smpl_motion_file=$smpl_dir" \
+    '++manager_env.commands.motion.motion_lib_cfg.exclude_motion_keys=[]'
+}
+
 case "${1:-}" in
   status) load_config; status ;;
   training-status) [[ $# -eq 2 ]] || { usage; exit 2; }; load_config; training_status "$2" ;;
@@ -204,7 +278,9 @@ case "${1:-}" in
   launch-nccl) [[ $# -eq 2 ]] || { usage; exit 2; }; load_config; launch_nccl "$2" ;;
   launch-smoke) [[ $# -eq 2 ]] || { usage; exit 2; }; load_config; launch smoke "$2" ;;
   launch-train) [[ $# -eq 2 ]] || { usage; exit 2; }; load_config; launch train "$2" ;;
+  launch-ground-finetune) [[ $# -eq 3 ]] || { usage; exit 2; }; load_config; launch_ground_finetune "$2" "$3" ;;
   remote-node) [[ $# -eq 7 ]] || { usage; exit 2; }; load_config; remote_node "$2" "$3" "$4" "$5" "$6" "$7" ;;
+  remote-ground-node) [[ $# -eq 8 ]] || { usage; exit 2; }; load_config; remote_ground_node "$2" "$3" "$4" "$5" "$6" "$7" "$8" ;;
   remote-nccl) [[ $# -eq 2 ]] || { usage; exit 2; }; load_config; remote_nccl "$2" ;;
   *) usage; exit 2 ;;
 esac

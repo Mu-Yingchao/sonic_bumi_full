@@ -58,6 +58,51 @@ class RewardsCfg:
     upright_penalty = None
 
 
+def reference_conditioned_undesired_contacts(
+    env: ManagerBasedRLEnv,
+    threshold: float,
+    sensor_cfg: SceneEntityCfg,
+    command_name: str,
+    low_reference_height: float,
+    low_pose_penalty_scale: float = 0.0,
+) -> torch.Tensor:
+    """Penalize non-foot contacts only when the reference pose is upright.
+
+    SONIC's standard ``undesired_contacts`` treats every selected non-foot body
+    contact as undesirable.  That is contradictory for reference clips whose
+    intended motion puts knees, hips, torso, or arms on the ground.  This term
+    preserves the original contact-count penalty for upright references and
+    scales it down for low reference poses.
+
+    The condition uses the current reference anchor height, not the robot
+    height.  A policy therefore cannot avoid the penalty merely by falling
+    during an upright motion.
+    """
+
+    if not 0.0 <= low_pose_penalty_scale <= 1.0:
+        raise ValueError("low_pose_penalty_scale must be within [0, 1]")
+
+    contact_sensor = env.scene.sensors[sensor_cfg.name]
+    net_contact_forces = contact_sensor.data.net_forces_w_history
+    is_contact = (
+        torch.max(
+            torch.norm(net_contact_forces[:, :, sensor_cfg.body_ids], dim=-1),
+            dim=1,
+        )[0]
+        > threshold
+    )
+    contact_count = torch.sum(is_contact, dim=1).float()
+
+    command: TrackingCommand = env.command_manager.get_term(command_name)
+    reference_is_low = command.anchor_pos_w[:, 2] < low_reference_height
+    scale = torch.where(
+        reference_is_low,
+        torch.full_like(contact_count, low_pose_penalty_scale),
+        torch.ones_like(contact_count),
+    )
+    return contact_count * scale
+
+
 def tracking_anchor_pos_error(
     env: ManagerBasedRLEnv, command_name: str, std: float
 ) -> torch.Tensor:
