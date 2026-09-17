@@ -4196,3 +4196,28 @@ tmux new-session -d -s tensorboard_bumi3_three_source \
 - 未验证 `/data/muyingchao/SONIC_BUMI`、`/data/muyingchao/SONIC_N3` 两个目录
   是否为长期保留的项目资产还是临时数据；本轮只读访问，未改写、未删除，
   也未确认这两个目录的清理/保留策略，如需长期依赖其中数据应向用户确认。
+
+### 4. 发现并修正远程命名混淆：`origin` 已改指向内网 GitLab，不再是 GitHub
+
+- 推送本节文档提交时发现，本地 `git push origin main` 实际推到了
+  `git@10.113.0.24:muyingchao/sonic_bumi_full.git`（内网），而不是文档里
+  一直描述的 GitHub；`git remote -v` 确认本地实际有两个远程：`github`
+  （`git@github.com:Mu-Yingchao/sonic_bumi_full.git`，真正的唯一真源）和
+  `origin`（内网 GitLab 镜像）。会话早些时候的 `git push origin main`
+  （`b0c9547`、`49e4fd2` 两次）确实推到了 GitHub（当时终端输出明确显示
+  `To github.com:...`），说明 `origin` 的 URL 是在本次会话过程中被改指向的，
+  改动来源未知（本次会话没有执行过 `git remote set-url`）。
+- 已用 `git push github main` 把落后的提交补推到 GitHub，确认本地、GitHub、
+  内网 origin、GPU14、GPU15 五处重新一致（`b2f0096`）。
+- 用户明确指示：之后默认一律推到 GitHub（`git push github main`），因为
+  本地↔服务器的同步闭环设计上就是通过 GitHub 完成的；只有用户明确要求时才
+  推到内网 GitLab（`git push origin main`）。
+- 已把这条规则写入 `docs/source/getting_started/bumi3_local_and_16gpu_guide.md`
+  的"日常修改同步顺序"一节（把示例命令从 `git push origin main` 改为
+  `git push github main`，并新增一段"本地远程命名注意"说明两个远程分别是什么、
+  默认应该推哪个）。`codex_local_control_multi_node_training.md` 里的
+  `git remote add origin git@github.com:...` 仍然正确（面向全新项目的模板，
+  新项目不会有这种预先存在、被改名的冲突远程），本轮未改动该模板文档。
+- 未执行项：未确认内网 `10.113.0.24` GitLab 镜像是谁、什么时候配置的，也未
+  确认该镜像今后的用途（纯备份还是另有同步需求）；如果用户后续说明用途，
+  应回来更新本节和对应文档。

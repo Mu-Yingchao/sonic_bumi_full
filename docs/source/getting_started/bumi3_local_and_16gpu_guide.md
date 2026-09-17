@@ -22,6 +22,14 @@ tools_local/bumi_cluster.sh verify-code
 开发机使用 SSH URL 推送，两台服务器使用 HTTPS URL 只读拉取。真实服务器地址放在被忽略的
 `.local/sonic_bumi_cluster.env`，不得记录密码或私钥正文。
 
+**本地远程命名注意**：本地开发机 `git remote -v` 会看到两个远程——`github`
+（`git@github.com:Mu-Yingchao/sonic_bumi_full.git`，唯一真源）和 `origin`
+（内网 `git@10.113.0.24:muyingchao/sonic_bumi_full.git`，备用/内网镜像）。
+`origin` 这个名字容易让人（和 Agent）习惯性以为它指向 GitHub 从而误推——
+**默认一律 `git push github main`**，因为本地↔服务器的同步闭环是通过 GitHub
+完成的（GPU14/GPU15 走 HTTPS 只读拉取的也是 GitHub，不是内网地址）；只有用户
+明确要求同步到内网 GitLab 时才 `git push origin main`。
+
 当前三份代码路径统一为：
 
 - 本地：`/home/yingchaomu/下载/sonic_bumi_full`
@@ -42,7 +50,7 @@ git pull --ff-only
 # 修改并完成测试后
 git add <明确的文件>
 git commit -m "说明本次修改"
-git push origin main
+git push github main
 
 # 再让两台服务器分别更新；服务器工作树不得直接编辑
 cd /data/ouqin/sonic_bumi_full
