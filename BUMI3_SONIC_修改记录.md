@@ -4145,3 +4145,54 @@ tmux new-session -d -s tensorboard_bumi3_three_source \
 - 交付确认：本地、GitHub（`git push origin main`）、gpu14、gpu15 均已同步到
   `b0c95477ac01a3cb1535c03406fc3cb72e412c8e`；`sonic_bumi3_ground_finetune_100k_20260916`
   训练已在两端以 tmux 会话形式持续运行，未依赖任何前台 SSH 连接。
+
+## 2026-09-17：调研旧项目 BVH 对齐方法论并整理新机型数据准备经验文档
+
+### 1. 起点与背景
+
+- 用户追问"BVH→SMPL 是否经过对齐筛选"，本轮先只读核查两个不在本仓库内、
+  也不在当前两台训练服务器（GPU14/GPU15，`/data/ouqin/...`）上的历史数据目录：
+  `/data/muyingchao/SONIC_BUMI`（BUMI 早期数据准备项目）与
+  `/data/muyingchao/SONIC_N3`（并行的 N3 机型项目），两者恰好和 GPU14
+  物理共存，通过已有的 `GPU14_SSH`/`SSH_KEY` 即可只读访问，未新增任何凭据
+  或连接方式，也未修改这两个目录下的任何文件。
+- 核查确认：`/data/ouqin/datasets/bumi3/train/`（当前生产训练数据）的
+  `audit.json` 显示 `"pairs": 97660, "passed": 97660, "failed": 0`，与
+  `SONIC_BUMI/reports/final_clips.txt`（103,126 行）之差恰好等于
+  `SONIC_BUMI/reports/joint_limit_rejected_clips.txt` 的行数（5,466 行），
+  `103126 - 5466 = 97660`，证明当前生产数据确实是"BVH 对齐检查 → SMPL 帧数
+  修复 → 关节限位筛选"三层过滤后的最终结果，链路可追溯、数字可对上。
+- `SONIC_BUMI/tools/make_smpl_symlinks.py` 的 docstring 确认其 SMPL 数据来源
+  为 `SONIC_N3 smpl_filtered`，实地核查 `/data/muyingchao/SONIC_N3/data/extracted/
+  smpl_filtered` 与 `sample_data/smpl_filtered` 均存在，证明 SMPL 数据在
+  BUMI3/N3 两个机型项目间确实被复用，而不是各自独立重新拟合。
+
+### 2. 新增文档
+
+- 新增 `docs/source/getting_started/sonic_motion_dataset_alignment_playbook.md`：
+  面向"给新机型准备 SONIC 训练数据的 Claude Code"整理的经验步骤文档，内容
+  来自对 `SONIC_BUMI/reports/alignment_summary.md`、
+  `reclassification_summary.md`、`HANDOFF.md` 的实地阅读与提炼，覆盖：
+  机型相关/无关数据流的划分、BVH↔Robot 对齐检查三项方法（时长/lag/分段）
+  及其阈值校准方法论（注入偏移灵敏度测试、富集分析）、A/B/C/D 分档策略、
+  SMPL/Robot 帧数修复、关节限位筛选、坐标契约踩坑记录（Y-up/Z-up 变换只
+  适用机器人侧、Euler 角速度伪极值问题）、只读软链接索引构建方式，以及给
+  新机型项目的执行清单。文末列出旧项目参考实现的具体文件路径（明确标注
+  "不在本仓库内、不可跨项目直接 import，需要移植或重新实现"），并声明旧项目
+  校准出的具体阈值数字（如 0.5m 动态范围阈值、35x 富集倍数）不能直接套用到
+  新机型，必须用新机型自己的数据重新校准。
+- `docs/source/getting_started/bumi3_local_and_16gpu_guide.md` 顶部增加一行
+  交叉引用指向新文档，与该文件已有的
+  `codex_local_control_multi_node_training.md` 引用风格一致。
+
+### 3. 兼容性与验证边界
+
+- 本轮不改动任何训练代码、配置、机器人资产或数据本身，只新增/编辑纯文档；
+  `sonic_bumi3_ground_finetune_100k_20260916` 训练未受影响，未停止、未重启。
+- 未执行项：未在新机型上实际运行文档里描述的对齐检查工具链（本仓库当前
+  没有新机型项目，本文档是提前为未来新机型准备的参考资料，无法针对不存在
+  的新机型跑真实验证）；未尝试移植 `SONIC_BUMI/tools/` 下的具体脚本进本仓库，
+  文档中明确说明这些脚本位于仓库外部服务器，仅供查阅方法论。
+- 未验证 `/data/muyingchao/SONIC_BUMI`、`/data/muyingchao/SONIC_N3` 两个目录
+  是否为长期保留的项目资产还是临时数据；本轮只读访问，未改写、未删除，
+  也未确认这两个目录的清理/保留策略，如需长期依赖其中数据应向用户确认。
