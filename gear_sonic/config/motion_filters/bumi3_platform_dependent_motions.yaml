@@ -1,0 +1,102 @@
+# SPDX-License-Identifier: Apache-2.0
+# BUMI3 台面/梯子依赖动作黑名单——这些参考动作在平地仿真中物理上不可复现。
+#
+# 判据：参考根高度在首帧或末帧持续高于 0.62 m（BUMI3 直立根高 0.46 m + 0.16 m 余量），
+# 说明机器人脚下踩着仿真场景里不存在的台阶/梯子/墙。注意判据用的是**绝对高度**而不是
+# 首尾净变化：净变化会把跪下、盘腿坐、趴下这类正当低姿态动作一并误判，实测会误杀全部
+# kneeling_stop 系列。跳跃腾空瞬间不受影响，因为只看首尾两端的中位高度。
+#
+# 数据来源：gear_sonic/tools/scan_bumi3_reference_terrain.py 全量扫描 97,660 条训练动作，
+# 与 gear_sonic/tools/extract_motion_sampling_stats.py 从 100k 微调 checkpoint 提取的逐动作
+# 采样统计合并。这 84 条动作仅占数据集 0.086%，却吃掉了该次训练 12.62% 的 episode 预算，
+# 平均失败率 0.967——自适应采样把它们当作「困难动作」无限加权，算力全部浪费。
+#
+# 用法：在 exp 配置中写
+#   manager_env.commands.motion.motion_lib_cfg.exclude_motion_keys: ${platform_dependent_motions}
+# 或直接把下面的列表粘贴进 exclude_motion_keys。
+
+platform_dependent_motions:
+  - dancing_routine_V001_001__A216
+  - dancing_routine_V001_001__A216_M
+  - dancing_routine_V001_001__A217
+  - dancing_routine_V001_001__A217_M
+  - flip_from_wall_104__A304
+  - flip_from_wall_104__A304_M
+  - jump_off_50cm_001__A415_M
+  - jump_off_50cm_001__A416
+  - jump_off_50cm_001__A416_M
+  - jump_off_50cm_002__A415
+  - jump_off_50cm_002__A415_M
+  - jump_off_50cm_002__A416
+  - jump_off_50cm_002__A416_M
+  - jump_off_50cm_003__A415
+  - jump_off_50cm_003__A415_M
+  - jump_off_50cm_003__A416
+  - jump_off_50cm_003__A416_M
+  - jump_off_50cm_R_001__A415
+  - jump_off_50cm_R_001__A415_M
+  - jump_off_50cm_R_001__A416
+  - jump_off_50cm_R_002__A416
+  - jump_off_50cm_R_002__A416_M
+  - jump_off_50cm_R_003__A415
+  - jump_off_50cm_R_003__A415_M
+  - jump_off_50cm_R_003__A416
+  - jump_off_50cm_R_003__A416_M
+  - jump_off_front_50cm_001__A415
+  - jump_off_front_50cm_001__A415_M
+  - jump_off_front_50cm_001__A416_M
+  - jump_off_front_50cm_002__A415
+  - jump_off_front_50cm_002__A415_M
+  - jump_off_front_50cm_002__A416
+  - jump_off_front_50cm_002__A416_M
+  - jump_off_front_50cm_003__A415
+  - jump_off_front_50cm_003__A415_M
+  - jump_off_front_50cm_003__A416
+  - jump_off_front_50cm_003__A416_M
+  - jump_off_front_50cm_R_001__A416
+  - jump_off_front_50cm_R_001__A416_M
+  - jump_off_front_50cm_R_002__A416
+  - jump_off_front_50cm_R_002__A416_M
+  - jump_on_50cm_001__A415
+  - jump_on_50cm_001__A415_M
+  - jump_on_50cm_001__A416
+  - jump_on_50cm_001__A416_M
+  - jump_on_50cm_002__A415
+  - jump_on_50cm_002__A416
+  - jump_on_50cm_003__A415
+  - jump_on_50cm_003__A415_M
+  - jump_on_50cm_003__A416
+  - jump_on_50cm_003__A416_M
+  - jump_on_50cm_R_001__A415
+  - jump_on_50cm_R_001__A415_M
+  - jump_on_50cm_R_002__A415
+  - jump_on_50cm_R_002__A415_M
+  - jump_on_50cm_R_002__A416
+  - jump_on_50cm_R_002__A416_M
+  - jump_on_50cm_R_003__A415
+  - jump_on_50cm_R_003__A415_M
+  - jump_on_50cm_R_003__A416
+  - jump_on_50cm_R_003__A416_M
+  - ladder_jump_on_R_003__A300
+  - ladder_jump_on_R_003__A300_M
+  - ladder_jump_on_R_004__A300
+  - ladder_jump_on_R_004__A300_M
+  - ladder_jump_on_R_005__A300
+  - ladder_jump_on_R_005__A300_M
+  - ladder_jump_on_R_101__A301
+  - ladder_jump_on_R_101__A301_M
+  - ladder_jump_on_R_102__A301
+  - ladder_jump_on_R_102__A301_M
+  - ladder_jump_on_R_103__A301
+  - ladder_jump_on_R_103__A301_M
+  - ladder_slip_R_001__A300_M
+  - ladder_slip_R_002__A300
+  - ladder_slip_R_002__A300_M
+  - ladder_slip_R_003__A300
+  - ladder_slip_R_003__A300_M
+  - ladder_slip_R_101__A301
+  - ladder_slip_R_101__A301_M
+  - ladder_slip_R_102__A301
+  - ladder_slip_R_102__A301_M
+  - ladder_slip_R_104__A301
+  - ladder_slip_R_104__A301_M

@@ -4320,3 +4320,118 @@ tmux new-session -d -s tensorboard_bumi3_three_source \
 - 未执行：未停止或删除该训练目录；未对新旧模型做 SMPL encoder 对照；未做
   真机或 Isaac Lab GUI 复核，结论仅基于 MuJoCo headless sim2sim 的
   `minimum_root_height`/末帧根高，未包含姿态视觉质量的人工判断。
+
+## 2026-09-23：训练数据可行性审计——从 checkpoint 提取逐动作失败率、全量台面依赖扫描与剔除清单
+
+承接同日「评估 100k 地面接触专项微调训练效果」一节留下的两个待查项（采样器是否
+一直在啃不动的 bin 上空转、`anchor_ori_full`/`foot_pos_xyz` 全局放宽的危害），本轮
+不启动任何训练，只做只读数据审计，为下一轮训练配置提供事实依据。
+
+### 1. 免费先验：逐动作成功/失败统计其实已存在 checkpoint 里
+
+`MotionLibBase.get_state_dict()`（`gear_sonic/utils/motion_lib/motion_lib_base.py`
+约 2847 行）会把 `adp_samp_motion_num_evaluations` 与 `adp_samp_motion_num_failures`
+两个长度 `_num_unique_motions` 的张量写进 checkpoint 的 `env_state_dict['motion_lib']`，
+索引顺序与 `_motion_data_keys` 一致。因此**不需要重跑任何仿真**就能拿到全部 97,660
+条动作的历史失败率。新增 `gear_sonic/tools/extract_motion_sampling_stats.py` 做只读提取。
+
+两个必须注意的偏置（已写进脚本 docstring）：多卡训练在
+`sync_and_compute_adaptive_sampling` 里对这两个计数取**跨卡均值**，全局总量需乘以卡数；
+统计来自训练分布，带自适应采样的强偏置、随机起始时刻、域随机化，且失败判据是该次
+训练所用的（已放宽的）termination 阈值。只能当先验，不能替代统一判据的全量评估。
+
+对 `model_step_100000.pt` 提取结果：
+
+- 全部 97,660 条均被评估过，全局约 12.05 亿 episode，按 episode 加权失败率 0.4853，
+  但**逐动作平均失败率只有 0.1215**——差距来自采样极度集中。
+- 采样次数分位：p50 = 227（跨卡平均），p100 = 593,786。最贪的一条动作比中位数多
+  采样 2600 倍，与之前观察到的 `effective_num_bins` 坍缩到 200~370 互相印证。
+- 按失败率分档的**预算**占比：失败率 > 0.90 的 362 条（0.37% 的动作）吃掉 24.78%
+  预算；> 0.70 的 731 条（0.75%）合计吃掉 **35.12%** 预算，而这批动作平均失败率约 0.9。
+- `dynamics_gate` 标记了 49,562 条（50.75%）为动力学不可行，这批动作吃掉 71.33% 预算；
+  失败率 > 0.70 的 731 条里有 83.9% 被它标记过。
+
+### 2. 关键发现：`dynamics_gate` 只是 quarantine 的前置条件，本次微调把闸门整个关掉了
+
+`adp_samp_dynamics_gate_failed` 在代码中**不会**直接影响采样概率，只在
+`_update_adaptive_sampling_quarantine()`（约 3139 行）里作为 `eligible` 的一个与项出现。
+本次微调设了 `quarantine.enable: false`，因此该标记完全未生效，50.75% 被标记的动作
+以满权重参与训练。**关掉 quarantine 同时把 `uniform_sampling_rate` 压到 0.20（困难
+采样 80%），等于拆掉刹车再踩满油门**，这是采样预算被少数啃不动动作吸走的直接原因。
+
+### 3. 更关键的发现：训练失败率与 sim2sim 失败几乎不相关
+
+用同日 sim2sim A/B 测试过的四条动作反查训练侧失败率：
+
+| 动作 | 训练失败率 | 全体百分位 | MuJoCo sim2sim |
+|---|---|---|---|
+| `kneeling_stop_003__A049` | 0.808 | 99.4% | 倒塌 |
+| `kneeling_loop_003__A040` | 0.257 | 79.9% | 倒塌 |
+| `kneeling_start_001__A037` | **0.031** | **47.7%** | 完全没做出跪姿 |
+| `wave_R_001__A428`（对照） | 0.006 | 28.1% | 正常 |
+
+`kneeling_start_001__A037` 在训练环境里比一半动作还简单，实际部署却完全失败。这**直接
+证伪了「按训练失败率划分成功/失败集、二阶段重点训练失败集」这条路对 kneeling 问题的
+有效性**——该动作会被划进成功集。最可能的解释是微调把 `anchor_ori_full` 0.2→1.0、
+`foot_pos_xyz` 0.20→0.35 且全局生效（非仅低姿态），使训练环境把「站着不动、姿态严重
+偏离但没倒」判成成功，系统性低估失败。这为 2026-09-16 §2 记录的设计缺口提供了量化证据。
+
+推论：后续全量评估**必须用 baseline 严格阈值并同时记录 `mpjpe_g`**，只看 `terminated`
+会重复同一个错误。
+
+### 4. 全量台面依赖扫描：新增两个工具，一次判据修正
+
+新增 `gear_sonic/tools/scan_bumi3_reference_terrain.py`，只读 `root_trans_offset` 的 z
+分量，不做 FK、不加载 MJCF，可在无 GPU 的数据服务器上批量运行。GPU14 上 32 进程扫完
+97,660 条约 5 分钟。
+
+新增 `gear_sonic/scripts/replay_bumi3_reference.py`，纯运动学回放参考动作：复用
+`Bumi3Contract` 与 `load_reference_motion`，逐帧写 qpos 后只调用 `mj_forward`，**不加载
+ONNX、不做物理步进**，因此画面里是数据集本身而非策略行为；刻意不做 heading 对齐或高度
+修正，否则「悬空」这个要观察的特征会被渲染层抹掉。`--headless` 下只出根高度诊断表。
+
+**判据修正（重要）**：首版用「首尾根高净变化超过阈值」判定，全量跑出 230 条地形依赖、
+可回收 13.46% 预算。但与采样统计合并后发现候选剔除清单里混进了 `kneeling_stop`（8 条）、
+`sit_on_heels_stop`、`stand_up_lying`、`idle_crawl_stop`——这些是正当低姿态动作，
+`kneeling_start_001__A037` 的净变化 −0.254 不过是站立 0.46 跪到 0.21 的正常高度变化。
+**按该清单筛会把地面接触专项要修的目标动作直接删掉。**
+
+改为**绝对高度**判据：平地上根高度可以任意降低，但不可能在动作起止的静止状态持续
+**高于**站立高度，除非脚下有仿真里不存在的东西。阈值取 0.62 m（BUMI3 直立根高 0.46
+加 0.16 余量），只看首尾各 10% 帧的中位高度，因此跳跃腾空瞬间不受影响。
+
+修正后的校验结果：
+
+- `kneeling`(76) / `sit_on_heels`(7) / `stand_up_lying`(9) / `idle_crawl`(24) /
+  `flip_360`(22) / `flip_180`(18) **全部 0 条误杀**。后空翻峰值根高 1.018 m，但首尾
+  都在 0.46，正确保留为平地可行。
+- 命中 89 条台面依赖，平均失败率 0.923，吃掉 12.62% 预算。
+
+### 5. 产物：剔除清单与数字结论
+
+新增 `gear_sonic/config/motion_filters/bumi3_platform_dependent_motions.yaml`，
+84 条（台面依赖且失败率 ≥ 0.5），按族分布：`jump_off_50cm` 20、`jump_on_50cm` 20、
+`jump_off_front_50cm` 15、`ladder_jump_on` 12、`ladder_slip` 11、
+`dancing_routine_V001` 4、`flip_from_wall` 2。
+
+**这 84 条仅占数据集 0.086%，却吃掉本次训练 12.62% 的 episode 预算，平均失败率 0.967。**
+
+同样重要的是剔除它们之后剩下的部分：失败率 > 0.70 的 731 条里，台面依赖只占 144 条
+（13.37% 预算），**其余 587 条是平地可行但学不会的动作，吃掉 21.76% 预算**
+（`jog_ff_loop_180`、`turn_walk_360`、`flip_360`、`burpee`、`injured_R_leg_*` 等）。
+这批**不应剔除**——它们是正当训练目标，只能靠恢复 quarantine 做动态兜底，或接受其难度。
+即：筛数据最多回收约 12.6% 算力，不能指望靠筛数据解决全部问题。
+
+同日早前把 `burpee`、`flying_wings` 归为「物理不可能」是错的：实测两者根高度全程贴地
+（burpee 峰值 0.583 就是跳起那一下），属于平地可行但确实难，此处更正。
+
+### 6. 未执行项
+
+- 未修改任何训练配置，未启动任何训练，未把黑名单接入 `exclude_motion_keys`。
+- 未跑用 baseline 严格阈值的全量 `im_eval` 评估（§3 推论要求的那一步），因此
+  「站着混过去」这一类的真实规模仍然未知，下一轮训练配置尚不具备定稿条件。
+- 台面判据只覆盖「脚下有台子」这一种不可行性；依靠墙面支撑、抓握外物等其他
+  外部接触依赖未做检测。`dancing_routine_V001` 4 条命中原因未逐条人工确认。
+- 服务器保留产物：`/data/ouqin/analysis/{ground_ft_100k_motion_stats.json,
+  terrain_scan_full.json,terrain_scan.log,scan_bumi3_reference_terrain.py}`，未清理。
+- 本地新增 `data/bumi3_terrain_check/robot/`（12 条样本动作，Git 忽略），供回放复核用。
