@@ -4221,3 +4221,102 @@ tmux new-session -d -s tensorboard_bumi3_three_source \
 - 未执行项：未确认内网 `10.113.0.24` GitLab 镜像是谁、什么时候配置的，也未
   确认该镜像今后的用途（纯备份还是另有同步需求）；如果用户后续说明用途，
   应回来更新本节和对应文档。
+
+## 2026-09-23：评估 100k 地面接触专项微调训练效果——kneeling 未见改善
+
+### 1. 训练完成状态
+
+- `sonic_bumi3_ground_finetune_100k_20260916` 已于两端 tmux 会话自然退出，
+  `training-status` 显示 `Learning iteration 100000`、`ETA: 0.0s`，两端 16 卡
+  显存/利用率均已归零，进程数为 0，确认正常跑完 100,000 iteration 而非崩溃
+  或被杀。最终 `Mean rewards: 3.53358`（单次快照），`last.pt`/
+  `model_step_100000.pt` 等间隔 checkpoint 齐全。
+
+### 2. 原始 reward 曲线不能直接当作效果指标，已用 adaptive sampling 诊断量佐证
+
+- 从 `node0.log` 抽取全程 `Learning iteration`/`Mean rewards`（每 2000 轮一个
+  采样点，`100000/2000=50` 点）：iteration 1 为 `-1.475`，iteration 2000 冲高到
+  `16.301`（峰值），随后持续下滑，iteration 16000 左右降到约 `3`，此后到
+  iteration 100000 一直在 `2~4` 区间震荡，末值 `3.534`。单看这条曲线容易误读为
+  "训练变差了"。
+- 交叉核对 `Env/adp_samp/effective_num_bins`：iteration 1 为 `5519`（刚从
+  checkpoint 重置、采样接近均匀），iteration 2000 骤降到 `318`，此后全程稳定在
+  `200~370` 区间——说明 80% 困难采样权重让采样器迅速把注意力collapse到一小撮
+  持续失败的高难度 bin 上，reward 下滑主要是"被评估的任务越来越难"而不是
+  "策略在退步"。
+- 交叉核对 `Env/adp_samp/motion_failure_rate_mean`：iteration 2000~6000 维持在
+  约 `3%` 低点，此后到 iteration 100000 持续爬升到约 `12%`——与
+  `effective_num_bins` 收窄到一小撮高难度 bin 的时间点吻合，进一步支持"任务
+  难度上升"而非单纯"策略变差"的解释；但也说明策略在这批高难度 bin 上
+  **整个训练后 80% 时间都没有把失败率降下来**，本身就是效果存疑的信号，
+  不能简单归为"良性噪声"。
+
+### 3. 真实行为验证：导出新旧 checkpoint 的 ONNX，在完全相同的三条已知失败
+   kneeling 动作和一条标准动作上做 A/B 对照
+
+- 用 `gear_sonic/eval_agent_trl.py checkpoint=.../model_step_100000.pt
+  +num_envs=1 +headless=True +export_onnx_only=true` 在 GPU14 单卡导出微调后
+  checkpoint 的 ONNX（首次尝试因 `base_eval.yaml` struct 严格模式两次失败：
+  `num_envs`/`headless`/`export_onnx_only` 均不在其默认 struct 中，需要 `+`
+  前缀新增而非覆盖；`TMPDIR` 未指向 `$RUN_ROOT/.tmp/ouqin/...`
+  时会因 `/tmp/isaaclab` 归属其他账号触发 `PermissionError`，补上后成功）。
+  导出产物 `model_step_100000_g1.onnx`（SHA256
+  `c3453fc87eaf8d86136e1ea77a5bf422b8303626798371c367f5943e17cd906f`）、
+  `model_step_100000_smpl.onnx`（SHA256
+  `e40eced1c84fcdacb7758693968a88355de95783d91a64b5cee7000e96634c6e`），
+  下载到本地并逐项核对 SHA256 与服务器一致，另存为
+  `models/deployment/{robot,smpl}/model_step_100000_groundft.onnx`（与
+  微调前的基线 `model_step_100000.onnx` 区分，两者都保留供对照）。
+- 用本地 `.venv_sim`、`gear_sonic/scripts/run_bumi3_sim2sim.py --encoder robot
+  --headless --no-real-time`（无 GUI，不需要 NVIDIA 启动器）在**完全相同**的
+  `data/bumi3_sim2sim_test/kneeling/robot/{kneeling_loop_003__A040,
+  kneeling_stop_003__A049, kneeling_start_001__A037}.pkl` 三条此前已明确记录为
+  失败的 kneeling 动作、以及一条标准动作 `wave_R_001__A428.pkl` 上，分别用
+  微调前（`model_step_100000.onnx`）和微调后
+  （`model_step_100000_groundft.onnx`）跑一遍，读取 `BUMI3_SIM2SIM_STATS`
+  的 `minimum_root_height`/`root_height`（末帧）。同时用
+  `joblib.load` 读取三条参考动作自身的 `root_trans_offset[:,2]`
+  范围，确认动作真正的目标根高度（而不是想当然认为低根高就是"在跪"）：
+  - `kneeling_loop_003__A040`：参考目标全程 `0.255~0.290m`；微调前实测最低
+    `0.0467m`、微调后 `0.0445m`——**两者都远低于目标，仍是同样的倒塌，微调
+    后甚至略低**。
+  - `kneeling_stop_003__A049`：参考目标末帧应回到 `0.464m`（跪起立起）；
+    微调前末帧 `0.0497m`、微调后 `0.0566m`——**两者都停在接近地面，仍未能
+    起立，微调前后几乎没有差别**。
+  - `kneeling_start_001__A037`：参考目标末帧应降到 `0.203m`（站立转下跪）；
+    微调前末帧 `0.366m`、微调后 `0.367m`——**两者都停留在接近站立的高度，
+    没有真正跪下去，和微调前用户此前记录的"保持站立稳定但没有复现跪姿"
+    现象完全一致，微调前后无实质差别**。
+  - `wave_R_001__A428`（标准回归检查）：微调前最低根高 `0.4569m`、微调后
+    `0.4582m`，两者均完整跑完 219 步，**没有观察到普通动作的退化**。
+
+### 4. 结论
+
+- **回归风险控制住了**：普通站立/揮手动作在微调前后表现几乎相同，halved LR +
+  完整数据集 replay 的"防遗忘"设计达到了预期效果。
+- **本轮微调没有解决它原本要解决的问题**：在完全相同的三条已知失败 kneeling
+  动作上，微调前后的 `minimum_root_height`/末帧根高几乎没有变化，三条动作
+  分别代表的三类失败模式（倒塌、起立失败、不敢真正下跪）**均未见改善**。
+  §2 的 adaptive sampling 诊断量显示策略在被采样器持续锁定的高难度 bin 上，
+  从 iteration ~16000 到 100000（训练 84% 的时长）失败率一路从 3% 爬升到
+  12%、没有再降下来，与这里三条 kneeling 动作的直接测试结果互相印证——
+  不是评估方法的偶然噪声，是训练本身在这批困难动作上没有取得进展。
+- 本轮**未**验证 SMPL encoder 路径（只测了 robot encoder），也未测试除
+  这四条以外的其他困难动作（如 lying、crawling），不能排除微调对其他类型
+  地面接触动作有帮助；结论仅限于这四条被测试的动作。
+- 建议下一步方向（供用户决策，本轮未执行）：回看本文档 2026-09-16
+  §2 记录的已知设计取舍——`anchor_ori_full`/`foot_pos_xyz` 终止阈值放宽是
+  全局生效（非仅低姿态），且 `effective_num_bins` 早早收窄到 200~370 附近
+  可能意味着采样器一直在少数几个"啃不动"的 bin 上空转、没有把预算分散到
+  足够多样的地面接触样本上——这两点都值得在下一轮微调前重新审视，而不是
+  简单加大 iteration 数重跑同一配置。
+
+### 5. 产物与未执行项
+
+- 保留产物：`models/deployment/{robot,smpl}/model_step_100000_groundft.onnx`
+  （本地，Git 忽略）；服务器端
+  `$RUN_ROOT/sonic_bumi3_ground_finetune_100k_20260916/{model_step_100000.pt,
+  exported/*}` 完整保留，未清理，供后续需要时复用或进一步诊断。
+- 未执行：未停止或删除该训练目录；未对新旧模型做 SMPL encoder 对照；未做
+  真机或 Isaac Lab GUI 复核，结论仅基于 MuJoCo headless sim2sim 的
+  `minimum_root_height`/末帧根高，未包含姿态视觉质量的人工判断。
