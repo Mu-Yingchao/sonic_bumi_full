@@ -15,9 +15,11 @@ Usage:
   tools_local/bumi_cluster.sh verify-code [EXPECTED_SHA]
   tools_local/bumi_cluster.sh launch-nccl RUN_ID
   tools_local/bumi_cluster.sh launch-smoke RUN_ID
+  tools_local/bumi_cluster.sh launch-smoke-filtered RUN_ID
   tools_local/bumi_cluster.sh launch-train RUN_ID
+  tools_local/bumi_cluster.sh launch-train-filtered RUN_ID
   tools_local/bumi_cluster.sh launch-ground-finetune RUN_ID CHECKPOINT
-  tools_local/bumi_cluster.sh remote-node MACHINE_RANK RUN_ID ENVS ITERATIONS ROBOT_DIR SMPL_DIR
+  tools_local/bumi_cluster.sh remote-node MACHINE_RANK RUN_ID ENVS ITERATIONS ROBOT_DIR SMPL_DIR EXP_NAME
   tools_local/bumi_cluster.sh remote-ground-node MACHINE_RANK RUN_ID ENVS ITERATIONS ROBOT_DIR SMPL_DIR CHECKPOINT
 
 All commands except the remote-* entry points run on the workstation.
@@ -95,11 +97,13 @@ verify_code() {
 
 remote_start() {
   local node="$1" rank="$2" run_id="$3" envs="$4" iterations="$5" robot_dir="$6" smpl_dir="$7"
+  local exp_name="$8"
   local inner remote_cmd session_name
   session_name="sonic_${run_id}_node${rank}"
   printf -v inner \
-    "bash tools_local/bumi_cluster.sh remote-node %q %q %q %q %q %q > %q 2>&1 < /dev/null" \
-    "$rank" "$run_id" "$envs" "$iterations" "$robot_dir" "$smpl_dir" "$RUN_ROOT/$run_id/node${rank}.log"
+    "bash tools_local/bumi_cluster.sh remote-node %q %q %q %q %q %q %q > %q 2>&1 < /dev/null" \
+    "$rank" "$run_id" "$envs" "$iterations" "$robot_dir" "$smpl_dir" "$exp_name" \
+    "$RUN_ROOT/$run_id/node${rank}.log"
   printf -v remote_cmd \
     "mkdir -p %q && command -v tmux >/dev/null && ! tmux has-session -t %q 2>/dev/null && tmux new-session -d -s %q -c %q %q && echo STARTED_TMUX:%q" \
     "$RUN_ROOT/$run_id" "$session_name" "$session_name" "$REMOTE_REPO" "$inner" "$session_name"
@@ -123,7 +127,9 @@ remote_ground_start() {
 }
 
 launch() {
-  local mode="$1" run_id="$2" envs iterations robot_dir smpl_dir
+  local mode="$1" run_id="$2" envs iterations robot_dir smpl_dir exp_name
+  # 基础 exp 保持原有全量数据集行为；filtered 变体只多剔除台面/梯子依赖动作。
+  exp_name="manager/universal_token/all_modes/sonic_bumi3"
   case "$mode" in
     smoke)
       envs="${SMOKE_ENVS_PER_GPU:-64}"; iterations="${SMOKE_ITERATIONS:-5}"
@@ -134,14 +140,27 @@ launch() {
       envs="${TRAIN_ENVS_PER_GPU:-4096}"; iterations="${TRAIN_ITERATIONS:-100000}"
       robot_dir="$ROBOT_MOTION_DIR"; smpl_dir="$SMPL_MOTION_DIR"
       ;;
+    train-filtered)
+      envs="${TRAIN_ENVS_PER_GPU:-4096}"; iterations="${TRAIN_ITERATIONS:-100000}"
+      robot_dir="$ROBOT_MOTION_DIR"; smpl_dir="$SMPL_MOTION_DIR"
+      exp_name="manager/universal_token/all_modes/sonic_bumi3_filtered"
+      ;;
+    smoke-filtered)
+      # smoke 用的是 64 条子集目录，台面动作多半不在其中，剔除清单命中 0 条属正常；
+      # 这一路只验证启动链路和 Hydra 能否解析 filtered 配置，不验证剔除效果。
+      envs="${SMOKE_ENVS_PER_GPU:-64}"; iterations="${SMOKE_ITERATIONS:-5}"
+      robot_dir="${SMOKE_ROBOT_MOTION_DIR:-$ROBOT_MOTION_DIR}"
+      smpl_dir="${SMOKE_SMPL_MOTION_DIR:-$SMPL_MOTION_DIR}"
+      exp_name="manager/universal_token/all_modes/sonic_bumi3_filtered"
+      ;;
     *) echo "Unknown mode: $mode" >&2; exit 2 ;;
   esac
   [[ "$run_id" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "Unsafe RUN_ID" >&2; exit 2; }
   verify_code
   echo "Starting rank 1 first; it will wait for rank 0 rendezvous."
-  remote_start gpu15 1 "$run_id" "$envs" "$iterations" "$robot_dir" "$smpl_dir"
-  remote_start gpu14 0 "$run_id" "$envs" "$iterations" "$robot_dir" "$smpl_dir"
-  echo "Started $mode: run=$run_id, envs/GPU=$envs, world=16, iterations=$iterations"
+  remote_start gpu15 1 "$run_id" "$envs" "$iterations" "$robot_dir" "$smpl_dir" "$exp_name"
+  remote_start gpu14 0 "$run_id" "$envs" "$iterations" "$robot_dir" "$smpl_dir" "$exp_name"
+  echo "Started $mode: run=$run_id, envs/GPU=$envs, world=16, iterations=$iterations, exp=$exp_name"
 }
 
 launch_ground_finetune() {
@@ -199,6 +218,7 @@ remote_nccl() {
 
 remote_node() {
   local rank="$1" run_id="$2" envs="$3" iterations="$4" robot_dir="$5" smpl_dir="$6"
+  local exp_name="${7:-manager/universal_token/all_modes/sonic_bumi3}"
   local experiment_dir="$RUN_ROOT/$run_id"
   cd "$REMOTE_REPO"
   [[ -x "$REMOTE_PYTHON" ]] || { echo "Python missing: $REMOTE_PYTHON" >&2; exit 1; }
@@ -226,13 +246,14 @@ remote_node() {
     --machine_rank="$rank" \
     --main_process_ip="$MASTER_ADDR" --main_process_port="$MASTER_PORT" \
     gear_sonic/train_agent_trl.py \
-    +exp=manager/universal_token/all_modes/sonic_bumi3 \
+    "+exp=$exp_name" \
     +resume=false checkpoint=null auto_load_latest=false use_wandb=false headless=True \
     "experiment_dir=$experiment_dir" "num_envs=$envs" \
     "++algo.config.num_learning_iterations=$iterations" \
     "++manager_env.commands.motion.motion_lib_cfg.motion_file=$robot_dir" \
-    "++manager_env.commands.motion.motion_lib_cfg.smpl_motion_file=$smpl_dir" \
-    '++manager_env.commands.motion.motion_lib_cfg.exclude_motion_keys=[]'
+    "++manager_env.commands.motion.motion_lib_cfg.smpl_motion_file=$smpl_dir"
+  # 这里不再命令行覆盖 exclude_motion_keys：基础 sonic_bumi3.yaml 本身已是空列表，
+  # 而 filtered 变体需要由配置文件提供 84 条台面动作清单，命令行硬编码空列表会压掉它。
 }
 
 remote_ground_node() {
@@ -277,9 +298,11 @@ case "${1:-}" in
   verify-code) load_config; verify_code "${2:-}" ;;
   launch-nccl) [[ $# -eq 2 ]] || { usage; exit 2; }; load_config; launch_nccl "$2" ;;
   launch-smoke) [[ $# -eq 2 ]] || { usage; exit 2; }; load_config; launch smoke "$2" ;;
+  launch-smoke-filtered) [[ $# -eq 2 ]] || { usage; exit 2; }; load_config; launch smoke-filtered "$2" ;;
   launch-train) [[ $# -eq 2 ]] || { usage; exit 2; }; load_config; launch train "$2" ;;
+  launch-train-filtered) [[ $# -eq 2 ]] || { usage; exit 2; }; load_config; launch train-filtered "$2" ;;
   launch-ground-finetune) [[ $# -eq 3 ]] || { usage; exit 2; }; load_config; launch_ground_finetune "$2" "$3" ;;
-  remote-node) [[ $# -eq 7 ]] || { usage; exit 2; }; load_config; remote_node "$2" "$3" "$4" "$5" "$6" "$7" ;;
+  remote-node) [[ $# -eq 8 ]] || { usage; exit 2; }; load_config; remote_node "$2" "$3" "$4" "$5" "$6" "$7" "$8" ;;
   remote-ground-node) [[ $# -eq 8 ]] || { usage; exit 2; }; load_config; remote_ground_node "$2" "$3" "$4" "$5" "$6" "$7" "$8" ;;
   remote-nccl) [[ $# -eq 2 ]] || { usage; exit 2; }; load_config; remote_nccl "$2" ;;
   *) usage; exit 2 ;;

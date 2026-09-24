@@ -1,0 +1,108 @@
+# SPDX-License-Identifier: Apache-2.0
+# BUMI3 全量 100k 训练配置：在基础配置之上剔除台面/梯子依赖动作。
+#
+# 与 sonic_bumi3.yaml 的唯一差别是 exclude_motion_keys。这 84 条参考动作的根高度
+# 在首帧或末帧持续高于 0.62 m（BUMI3 直立根高 0.46 m），说明机器人脚下踩着平地
+# 仿真场景里不存在的台阶/梯子/墙，物理上永远无法复现。它们仅占数据集 0.086%，却在
+# 上一轮 100k 微调中吃掉 12.62% 的 episode 预算，平均失败率 0.967——自适应采样把
+# 它们当作「困难动作」持续加权，算力全部浪费。
+#
+# 清单等同于 gear_sonic/config/motion_filters/bumi3_platform_dependent_motions.yaml，
+# 此处内联是因为 Hydra 的 exclude_motion_keys 需要在 exp 配置树内直接取到列表。
+# 判据与生成方式见 gear_sonic/tools/scan_bumi3_reference_terrain.py 与同名工具的 docstring。
+
+defaults:
+  - /exp/manager/universal_token/all_modes/sonic_bumi3
+  - _self_
+
+exp_var: filtered
+
+manager_env:
+  commands:
+    motion:
+      motion_lib_cfg:
+        exclude_motion_keys:
+          - dancing_routine_V001_001__A216
+          - dancing_routine_V001_001__A216_M
+          - dancing_routine_V001_001__A217
+          - dancing_routine_V001_001__A217_M
+          - flip_from_wall_104__A304
+          - flip_from_wall_104__A304_M
+          - jump_off_50cm_001__A415_M
+          - jump_off_50cm_001__A416
+          - jump_off_50cm_001__A416_M
+          - jump_off_50cm_002__A415
+          - jump_off_50cm_002__A415_M
+          - jump_off_50cm_002__A416
+          - jump_off_50cm_002__A416_M
+          - jump_off_50cm_003__A415
+          - jump_off_50cm_003__A415_M
+          - jump_off_50cm_003__A416
+          - jump_off_50cm_003__A416_M
+          - jump_off_50cm_R_001__A415
+          - jump_off_50cm_R_001__A415_M
+          - jump_off_50cm_R_001__A416
+          - jump_off_50cm_R_002__A416
+          - jump_off_50cm_R_002__A416_M
+          - jump_off_50cm_R_003__A415
+          - jump_off_50cm_R_003__A415_M
+          - jump_off_50cm_R_003__A416
+          - jump_off_50cm_R_003__A416_M
+          - jump_off_front_50cm_001__A415
+          - jump_off_front_50cm_001__A415_M
+          - jump_off_front_50cm_001__A416_M
+          - jump_off_front_50cm_002__A415
+          - jump_off_front_50cm_002__A415_M
+          - jump_off_front_50cm_002__A416
+          - jump_off_front_50cm_002__A416_M
+          - jump_off_front_50cm_003__A415
+          - jump_off_front_50cm_003__A415_M
+          - jump_off_front_50cm_003__A416
+          - jump_off_front_50cm_003__A416_M
+          - jump_off_front_50cm_R_001__A416
+          - jump_off_front_50cm_R_001__A416_M
+          - jump_off_front_50cm_R_002__A416
+          - jump_off_front_50cm_R_002__A416_M
+          - jump_on_50cm_001__A415
+          - jump_on_50cm_001__A415_M
+          - jump_on_50cm_001__A416
+          - jump_on_50cm_001__A416_M
+          - jump_on_50cm_002__A415
+          - jump_on_50cm_002__A416
+          - jump_on_50cm_003__A415
+          - jump_on_50cm_003__A415_M
+          - jump_on_50cm_003__A416
+          - jump_on_50cm_003__A416_M
+          - jump_on_50cm_R_001__A415
+          - jump_on_50cm_R_001__A415_M
+          - jump_on_50cm_R_002__A415
+          - jump_on_50cm_R_002__A415_M
+          - jump_on_50cm_R_002__A416
+          - jump_on_50cm_R_002__A416_M
+          - jump_on_50cm_R_003__A415
+          - jump_on_50cm_R_003__A415_M
+          - jump_on_50cm_R_003__A416
+          - jump_on_50cm_R_003__A416_M
+          - ladder_jump_on_R_003__A300
+          - ladder_jump_on_R_003__A300_M
+          - ladder_jump_on_R_004__A300
+          - ladder_jump_on_R_004__A300_M
+          - ladder_jump_on_R_005__A300
+          - ladder_jump_on_R_005__A300_M
+          - ladder_jump_on_R_101__A301
+          - ladder_jump_on_R_101__A301_M
+          - ladder_jump_on_R_102__A301
+          - ladder_jump_on_R_102__A301_M
+          - ladder_jump_on_R_103__A301
+          - ladder_jump_on_R_103__A301_M
+          - ladder_slip_R_001__A300_M
+          - ladder_slip_R_002__A300
+          - ladder_slip_R_002__A300_M
+          - ladder_slip_R_003__A300
+          - ladder_slip_R_003__A300_M
+          - ladder_slip_R_101__A301
+          - ladder_slip_R_101__A301_M
+          - ladder_slip_R_102__A301
+          - ladder_slip_R_102__A301_M
+          - ladder_slip_R_104__A301
+          - ladder_slip_R_104__A301_M
