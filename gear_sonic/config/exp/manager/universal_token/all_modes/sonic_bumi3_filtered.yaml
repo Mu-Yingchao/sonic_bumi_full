@@ -1,3 +1,4 @@
+# @package _global_
 # SPDX-License-Identifier: Apache-2.0
 # BUMI3 全量 100k 训练配置：在基础配置之上剔除台面/梯子依赖动作。
 #
