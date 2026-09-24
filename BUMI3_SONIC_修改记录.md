@@ -4526,3 +4526,80 @@ sim2sim 里实跑。六条动作（3 离群 + 3 对照）**全部完整跑完、
 - 未修改任何训练配置，未启动任何训练，未把任何黑名单接入 `exclude_motion_keys`。
 - 本地新增 `data/bumi3_outlier_check/{robot,smpl}/`（8 + 6 条对照动作，Git 忽略），
   保留供后续复核；服务器端无新增产物。
+
+## 2026-09-24：启动剔除台面依赖动作的 100k 全量训练（sonic_bumi3_filtered_100k_20260924_2204）
+
+用户决定用现有数据集重新训练 100k，并选择「加上本轮审计改进」而非原样重跑第一次。
+本节记录配置、启动前发现并修复的一个配置失效问题、smoke 验证与正式启动。
+
+### 1. 启动前的事实确认
+
+- 数据集自第一次 100k 训练以来**没有任何改动**：`train/robot` 目录最后修改于
+  2026-09-01、`train/smpl` 于 09-10，而第一次训练 09-11 启动。第一次训练的配置是
+  `exclude_motion_keys: []`、`uniform_sampling_rate: 0.9`、完整 97,660 条。
+  因此直接 `launch-train` 等同于原样重跑第一次，已向用户说明后由其选择 filtered 方案。
+- 两台服务器 16 张卡全部空闲（0% 利用率），磁盘 GPU14 剩 2.3T、GPU15 剩 2.6T，
+  单次 100k 产物约 21G，余量充足。
+
+### 2. 新增配置与启动器改动
+
+新增 `gear_sonic/config/exp/manager/universal_token/all_modes/sonic_bumi3_filtered.yaml`：
+继承 `sonic_bumi3`，**唯一差别**是 `exclude_motion_keys` 内联 84 条台面/梯子依赖动作。
+其余全部与第一次 100k 训练一致（`uniform_sampling_rate=0.9`、`quarantine.enable=true`、
+`anchor_ori_full=0.2`、`foot_pos_xyz=0.2`、`actor_lr=2e-5`、`critic_lr=1e-3`），
+因此本次结果可与第一次直接对比，变量只有一个。
+
+`tools_local/bumi_cluster.sh` 三处改动：
+
+1. `remote_node` 新增第 7 个参数 `exp_name`，默认仍为基础 `sonic_bumi3`，
+   已有 `launch-smoke`/`launch-train` 行为不变；`remote-node` 参数个数校验 7 改 8。
+2. **移除 `remote_node` 里硬编码的 `'++...exclude_motion_keys=[]'` 命令行覆盖。**
+   该覆盖对基础路径冗余（`sonic_bumi3.yaml` 本身已是空列表），但会压掉 filtered
+   配置文件提供的 84 条清单，不删则剔除完全不生效。
+3. 新增 `launch-train-filtered` 与 `launch-smoke-filtered` 入口，usage 同步更新。
+
+### 3. 启动前发现并修复：缺少 `# @package _global_` 导致黑名单静默失效
+
+在服务器上做 Hydra 组装验证时发现 `sonic_bumi3_filtered` 解析出的
+`exclude_motion_keys` 仍是 **0 条**。根因是新配置文件首行漏写 `# @package _global_`，
+Hydra 会把整个文件内容放进嵌套包，`manager_env` 覆盖根本不会落到全局配置树上。
+同目录的 `sonic_bumi3.yaml` 与 `sonic_bumi3_ground_finetune.yaml` 首行都有该指令。
+
+**这是一个会静默失效的问题**：训练能正常跑完 100k，日志无任何报错，只是剔除完全
+没有发生，6 个 GPU-天白费。补上该行后复验：base=0 条 / filtered=84 条，其余参数
+两者完全一致。提交为独立的 fix commit（`f6f7cf6`）以保留该教训。
+
+教训与 2026-09-16 的「启动器静默失败」同类：**配置类改动必须在启动前用真实 Hydra
+组装验证一次，不能只做 YAML 语法检查**，本地无 hydra 时到服务器上验证。
+
+### 4. Smoke 验证与正式启动
+
+先跑 `launch-smoke-filtered`（16 卡 × 64 envs × 5 iterations）：5 个 iteration 全部
+完成、零报错、tmux 会话正常自行退出、GPU 完全释放。日志中
+`Exact motion exclusion: requested=84, matched=0, missing=84, remaining=64` —— smoke64
+子集本来就不含这些动作，命中 0 条符合预期，关键是 `requested=84` 证明配置已送达。
+
+正式启动：
+
+- RUN_ID：`sonic_bumi3_filtered_100k_20260924_2204`
+- 入口：`bash tools_local/bumi_cluster.sh launch-train-filtered <RUN_ID>`
+- 规模：2 节点 × 8 卡 = 16 路 DDP，4096 envs/GPU，100,000 iterations，从零训练
+  （`+resume=false checkpoint=null`）
+- 代码版本：两台服务器均为 `f6f7cf6`，与本地/GitHub 一致
+- **剔除确认：`requested=84, matched=84, missing=0, remaining=97576`**
+  （97,660 − 84 = 97,576，精确对上）
+
+### 5. 未执行项与已知遗留
+
+- 本次**只改了数据剔除这一个变量**。前一日审计指出的判据问题（`anchor_ori_full` /
+  `foot_pos_xyz` 全局放宽的危害、kneeling 被宽判据判成功、turn_walk 被跟踪精度
+  判失败）**本轮均未处理**，因为在严格判据全量 `im_eval` 跑出来之前无法定量决策。
+  本次训练用的是第一次训练的原始严格阈值，不带任何放宽。
+- 仍未跑严格判据的全量 `im_eval`，判据偏差的真实规模依然未知。
+- 373 条同族离群动作按前一日结论判定为不可剔除，本次未剔除。
+- `remote_nccl_start` 仍保留 `exec` 前缀（NCCL 测试专用路径，非训练路径），未改动。
+- GPU14 上遗留两个旧 tensorboard tmux 会话（`tensorboard_bumi3`、
+  `tensorboard_ground_finetune_100k`），未清理，不影响训练。
+- 服务器 `/data/ouqin/analysis/scan_bumi3_reference_terrain.py` 是判据修正前的旧版本
+  （净变化判据，会误杀 kneeling_stop），仓库内版本已修正；若需在服务器重跑扫描，
+  应从仓库重新同步，勿直接使用该文件。
