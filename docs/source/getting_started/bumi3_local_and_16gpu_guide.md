@@ -6,7 +6,8 @@ DDS/CSV 三终端流程不是当前 BUMI3 sim2sim 入口，不能混用按键和
 本地 VSCode/Codex 作为控制中枢、GitHub 作为代码唯一真源、多节点作为计算端的完整
 可复用规范见 `codex_local_control_multi_node_training.md`。给新机型准备训练数据
 （BVH 对齐、SMPL/Robot 配对、筛选）的可复用经验见
-`sonic_motion_dataset_alignment_playbook.md`。
+`sonic_motion_dataset_alignment_playbook.md`。只想照抄启动流程、不关心背景原理的，
+见 `bumi3_launch_training_from_local.md`（含启动前检查、smoke 验证、故障排查速查表）。
 
 ## 1. 代码一致性规则
 

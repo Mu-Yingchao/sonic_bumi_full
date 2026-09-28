@@ -4603,3 +4603,102 @@ Hydra 会把整个文件内容放进嵌套包，`manager_env` 覆盖根本不会
 - 服务器 `/data/ouqin/analysis/scan_bumi3_reference_terrain.py` 是判据修正前的旧版本
   （净变化判据，会误杀 kneeling_stop），仓库内版本已修正；若需在服务器重跑扫描，
   应从仓库重新同步，勿直接使用该文件。
+
+## 2026-09-28：filtered 100k 训练在 iteration 69,008 被外部 SIGINT 中断；新增本地启动指南
+
+### 1. 事故经过与定性
+
+`sonic_bumi3_filtered_100k_20260924_2204` 于 2026-09-28 07:15:18 整体退出，完成
+iteration **69,008 / 100,000（69%）**，历时约 3.5 天。
+
+定性为**外部中断，不是训练故障**，依据：
+
+- `node0.log` 的退出原因是
+  `torch.distributed.elastic.multiprocessing.api.SignalException: Process 352123 got
+  signal: 2`。signal 2 即 **SIGINT**；torchrun 主进程先收到外部 SIGINT，再向 8 个
+  worker 转发 SIGINT、随后 SIGTERM。
+- 中断前最后一轮指标完全正常：`Iteration time: 4.27s`、`ETA: 135872.0s`、
+  `Mean rewards: 22.74030`、`Total timesteps: 108540198912`，且正常打印了
+  `Logging Directory`，下一行即为信号日志，中间没有任何异常。
+- 宿主内存 503 GiB 仅用 15 GiB，排除 OOM；`free`、`nvidia-smi` 均无异常。
+- GPU15 在 07:45:19 报 `Received a dump signal due to a collective timeout`
+  （rank 9/10），比 GPU14 晚整整 30 分钟，是 NCCL watchdog 在对端停止后的**连带
+  退出**，不是起因。两台日志最后修改时间 07:15:31 与 07:45:30 也印证该顺序。
+
+最可能的机制是**有人 attach 到训练 tmux 会话并按下 Ctrl+C**：tmux 中 Ctrl+C 正是向
+前台进程组发 SIGINT，与日志逐字吻合；`tmux kill-session` 发送的是 SIGHUP，对不上。
+`last` 显示 `ouqin pts/0`（来自 182.48.100.227）自 2026-09-24 09:58 起一直在线。
+**具体由谁触发无法从现有证据确定**，本条不作归因，仅记录机制与防范。
+
+### 2. 训练状态与用户决策
+
+- `last.pt` 写于 07:14（中断前约 1 分钟，约 iteration 69,000），
+  `model_step_068000.pt` 写于 05:57，共 34 个 checkpoint 约 13 GiB，全部完整保留。
+- 代码支持真正续跑：`train_agent_trl.py` 在 `config.resume` 为真时走
+  `resume_training()`，`PPOTrainer.load_checkpoint(resume=True)` 会恢复 optimizer、
+  lr_scheduler、`env_state_dict`（自适应采样/quarantine 统计）以及 `state.global_step`，
+  从中断处接着数到 100,000，而非重新计数。这与 `launch-ground-finetune` 的
+  `+resume=false`（只加载网络权重、其余全部重置）是两回事。
+- **用户决定不续跑，直接使用 69,008 步的结果**。因此本次 filtered 训练的最终步数为
+  69,008，与第一次 100k 的对比在步数上不对等，后续评估结论必须注明这一点。
+
+### 3. 中断前的训练指标快照（供后续对比）
+
+中断前最后一轮的自适应采样诊断量，与前两次训练相比明显更健康：
+
+- `effective_num_bins: 4183.1484`（上一轮微调曾坍缩到 200~370）
+- `num_concentrated_bins: 5.0000`
+- `quarantined_motions: 4060.0000`、`quarantine_ready: 1.0000`、
+  `quarantine_global_window_success_rate: 0.9009`（本次恢复了 quarantine）
+- `dynamics_gate_failed_motions: 49573.0000`
+- `evaluated_motions: 97576.0000`（与剔除后的数据集条数一致）
+- `motion_failure_fraction_global: 0.1631`、`motion_failure_rate_mean: 0.1366`
+
+TensorBoard 曲线（iteration 69,008）：`policy/approxkl_avg=0.01778`、
+`loss/value_avg=0.02513`。同位置对比第一次 100k（step 51757 vs 本次 51757）为
+`0.016 / 0.040`，本次 value loss 约为其一半；但数据集不同，该对比存在混杂因素，
+不能直接归因于剔除台面动作。
+
+### 4. 顺带发现：Actor 的「自适应学习率」实际长期失效
+
+用户询问 critic LR 固定 1e-3、actor 按 KL 调整这一设计的来由与效果时，拉取三次训练的
+TensorBoard 曲线发现：
+
+| Run | `lr/actor_actual` 贴下限 1e-5 的比例 | 首次触底 |
+|---|---|---|
+| 第一次 100k | 96.2% | step 3849 |
+| 地面接触微调 | 100.0% | step 1 |
+| 本次 filtered | 约 93% | 约 step 6900 |
+
+KL 控制器规则是 `kl > desired_kl*2 (=0.02)` 降 LR、`kl < desired_kl/2 (=0.005)` 升 LR。
+实测 `approxkl_avg` 稳定在 0.011~0.018，正好落在死区。因此训练早期 LR 被单向砍到硬下限
+`adaptive_lr_min=1e-5` 后，再也没有条件回升——**actor 实际以恒定 1e-5 训练，连配置初值
+2e-5 都未达到，更未接近上限 2e-4；critic 恒定 1e-3，为 actor 实际值的 100 倍**。
+
+该设计的来由已查清：KL 只调 actor 是上游 rsl_rl/PHC 血统的既有设计（KL 衡量策略分布
+偏移，对 critic 这个回归问题无意义）；critic 拥有独立 LR 是本项目更早期修复的一个缺陷
+（`ppo_im_phc.yaml` 声明了 `critic_learning_rate` 但代码从未使用，HuggingFace 默认只按
+weight decay 分两组，critic 实际一直跟随 actor 的 LR）；3e-4→1e-3 则是当时由用户明确
+指定、对齐 G1 分支 `sonic_release.yaml` 的配置。
+
+**但该设置从未做过对照实验**，修改记录中只有"配置确实生效"的验证
+（`lr/actor_actual=0.000151875`、`lr/critic_actual=0.001`），没有任何 A/B。本条仅记录
+发现，未做任何修改。
+
+### 5. 新增文档
+
+新增 `docs/source/getting_started/bumi3_launch_training_from_local.md`：从本地开发机
+启动训练的完整操作手册，含启动前四项检查、bundle 方式的代码同步、Hydra 组装验证、
+smoke 验证、正式启动、启动后三项必查、监控、停止训练，以及故障速查表。
+
+其中第 9.1 节"区分被中断与真崩溃"按本次事故写入：给出 signal 2/15、CUDA OOM、NCCL
+collective timeout 四种日志特征的含义，强调 **NCCL 超时通常是结果不是原因**，并给出
+"先比较两台日志最后修改时间"的排查顺序。防范措施为：**查看日志用 `tail -f`，不要
+`tmux attach` 到训练会话**；确需 attach 时使用只读模式 `tmux attach -t <session> -r`。
+
+### 6. 未执行项
+
+- 未续跑训练（用户决定），未删除该 run 的任何产物，34 个 checkpoint 全部保留。
+- 未对 actor/critic LR 设置做任何修改，也未安排对照实验。
+- 未追查 `pts/0` 会话的归属，未修改服务器上任何与之相关的配置。
+- 尚未从 69k checkpoint 导出 ONNX，也未做 sim2sim 评估。
