@@ -18,6 +18,27 @@ Git commit 是唯一代码版本标识。算法、配置、资产或部署代码
 tools_local/bumi_cluster.sh verify-code
 ```
 
+**新增 exp 配置时的必做检查**：`gear_sonic/config/exp/...` 下的配置文件首行必须写
+`# @package _global_`。漏写时 Hydra 会把整个文件的内容放进嵌套包，`manager_env`
+等覆盖根本不会落到全局配置树上，而**训练照常跑完、日志零报错**，只是覆盖完全没生效。
+2026-09-24 新增 `sonic_bumi3_filtered.yaml` 时就漏写过这一行，实测 84 条黑名单解析
+结果是 0 条。YAML 语法检查发现不了这个问题，必须做一次真实的 Hydra 组装验证
+（开发机通常没装 hydra，到服务器上跑）：
+
+```bash
+"$REMOTE_PYTHON" -c "
+from hydra import compose, initialize_config_dir
+import os
+with initialize_config_dir(config_dir=os.path.abspath('gear_sonic/config'), version_base=None):
+    cfg = compose(config_name='base',
+                  overrides=['+exp=manager/universal_token/all_modes/<新配置名>'])
+    print(cfg.manager_env.commands.motion.motion_lib_cfg.exclude_motion_keys)
+"
+```
+
+同理，`tools_local/bumi_cluster.sh` 里如果对某个字段有命令行 `++key=value` 硬编码，
+它会压掉配置文件的同名设置；新增依赖该字段的配置时必须先确认启动器没有硬编码覆盖。
+
 唯一真源是公开仓库 `https://github.com/Mu-Yingchao/sonic_bumi_full` 的 `main` 分支。
 开发机使用 SSH URL 推送，两台服务器使用 HTTPS URL 只读拉取。真实服务器地址放在被忽略的
 `.local/sonic_bumi_cluster.env`，不得记录密码或私钥正文。
@@ -274,13 +295,50 @@ bash tools_local/bumi_cluster.sh launch-train bumi3_16gpu_scratch_100k_YYYYMMDD_
 旧策略。默认正式配置每卡 4096 env；若要做保持 32768 全局环境的速度对照，在本机
 私有配置中另设 `TRAIN_ENVS_PER_GPU=2048`，并使用新的 run ID，不能覆盖正式实验。
 
+**剔除台面依赖动作的变体**：`launch-train-filtered` 与 `launch-smoke-filtered` 使用
+`sonic_bumi3_filtered` 配置，相对基础配置的唯一差别是 `exclude_motion_keys` 带上 84 条
+台面/梯子依赖动作（参考根高在首末帧持续高于 0.62 m，机器人脚下踩着平地场景里不存在的
+台阶/梯子/墙）。其余超参与基础配置完全一致，因此两者结果可直接对比。
+
+```bash
+bash tools_local/bumi_cluster.sh launch-smoke-filtered smoke_filtered_YYYYMMDD_HHMM
+bash tools_local/bumi_cluster.sh launch-train-filtered sonic_bumi3_filtered_100k_YYYYMMDD_HHMM
+```
+
+启动后必须在 `node0.log` 里确认剔除真的生效：
+
+```
+Exact motion exclusion: requested=84, matched=84, missing=0, remaining=97576
+```
+
+`matched` 为 0 说明清单没落到数据集上（smoke64 子集除外，那里本来就不含这些动作，
+`matched=0` 属正常，只需确认 `requested=84` 证明配置已送达）。
+
+### 4.0 已有 run 与 TensorBoard 端口对照
+
+每个 run 的 TensorBoard 需要独占一个远端端口，新开 run 时必须换端口，否则会和仍在
+运行的旧服务冲突。当前分配：
+
+| RUN_ID | 远端端口 | tmux session | 说明 |
+|---|---|---|---|
+| `sonic_bumi3_16gpu_4096_scratch_100k_20260911_150534` | 6006 | `tensorboard_bumi3` | 第一次 100k，全量 97,660 条 |
+| （历史 run） | 6007 | — | |
+| `sonic_bumi3_ground_finetune_100k_20260916` | 6008 | `tensorboard_ground_finetune_100k` | 地面接触专项微调，效果未达预期 |
+| `sonic_bumi3_filtered_100k_20260924_2204` | 6009 | `tb_filtered` | 剔除 84 条台面动作，97,576 条 |
+
+新 run 起 TensorBoard 前先查空闲端口：
+
+```bash
+ss -ltn | grep -E ':60[0-9][0-9]'
+```
+
 ### 4.1 一条命令确认训练进度和 16 GPU
 
 以下命令必须在本地开发机执行，不要在 GPU14/GPU15 上再绕公网 SSH：
 
 ```bash
 cd /home/yingchaomu/下载/sonic_bumi_full
-RUN_ID=sonic_bumi3_16gpu_4096_scratch_100k_20260911_150534
+RUN_ID=sonic_bumi3_filtered_100k_20260924_2204
 bash tools_local/bumi_cluster.sh training-status "$RUN_ID"
 ```
 
@@ -296,7 +354,7 @@ bash tools_local/bumi_cluster.sh training-status "$RUN_ID"
 从本地开发机执行：
 
 ```bash
-RUN_ID=sonic_bumi3_16gpu_4096_scratch_100k_20260911_150534
+RUN_ID=sonic_bumi3_filtered_100k_20260924_2204
 
 # GPU14/world-rank 0：训练指标、checkpoint 写入端
 ssh -i ~/.ssh/id_ed25519_sonic_bumi -p 22115 ouqin@117.161.121.54 \
@@ -312,7 +370,7 @@ ssh -i ~/.ssh/id_ed25519_sonic_bumi -p 22116 ouqin@117.161.121.54 \
 `muyingchao@RTX4090-gpu-014` 或 `ouqin@RTX4090-gpu-014`，直接运行：
 
 ```bash
-tail -f /data/ouqin/runs/sonic_bumi3_16gpu_4096_scratch_100k_20260911_150534/node0.log
+tail -f /data/ouqin/runs/sonic_bumi3_filtered_100k_20260924_2204/node0.log
 ```
 
 不要在服务器里使用 `~/.ssh/id_ed25519_sonic_bumi` 再连接公网地址；该私钥在本地开发机，
@@ -320,8 +378,11 @@ tail -f /data/ouqin/runs/sonic_bumi3_16gpu_4096_scratch_100k_20260911_150534/nod
 
 ### 4.3 TensorBoard 曲线
 
-当前 GPU14 已在 `tensorboard_bumi3` tmux session 中启动 TensorBoard 6006端口。本机的
-6006可能被 VS Code 端口代理占用，因此默认使用本地16006映射远端6006。每次查看时，只需
+远端端口按 §4.0 的对照表分配，一个 run 一个端口。下面以第一次 100k（6006）为例，
+查看其他 run 时只替换右侧的远端端口号即可；例如当前 filtered run 用
+`-L 6020:127.0.0.1:6009`。
+
+本机的 6006 可能被 VS Code 端口代理占用，因此默认使用本地16006映射远端6006。每次查看时，只需
 在本地开发机建立隧道并保持该终端开启：
 
 ```bash
@@ -354,25 +415,30 @@ ssh -N -i ~/.ssh/id_ed25519_sonic_bumi -p 22115 \
 `ExitOnForwardFailure=yes` 很重要：它保证本地端口绑定失败时 SSH 整体退出，不会发生“只绑定
 IPv6、浏览器的IPv4请求却被其他程序接走”的半成功状态。
 
-检查/重启服务器上的 TensorBoard（先从本地 SSH 登录 GPU14，再执行）：
+检查/重启服务器上的 TensorBoard（先从本地 SSH 登录 GPU14，再执行）。为新 run 启动时，
+`SESSION` 与 `PORT` 都要换成未被占用的值，并回填 §4.0 的对照表：
 
 ```bash
-tmux has-session -t tensorboard_bumi3 && echo TENSORBOARD_RUNNING
-ss -ltn | grep ':6006'
+RUN_ID=sonic_bumi3_filtered_100k_20260924_2204
+SESSION=tb_filtered
+PORT=6009
 
-RUN_ID=sonic_bumi3_16gpu_4096_scratch_100k_20260911_150534
-tmux new-session -d -s tensorboard_bumi3 \
+tmux has-session -t "$SESSION" 2>/dev/null && echo TENSORBOARD_RUNNING
+ss -ltn | grep ":$PORT"
+
+tmux new-session -d -s "$SESSION" \
   "/data/ouqin/envs/sonic_bumi/bin/python -m tensorboard.main \
    --logdir /data/ouqin/runs/$RUN_ID/tensorboard \
-   --host 127.0.0.1 --port 6006 \
+   --host 127.0.0.1 --port $PORT \
    >/data/ouqin/runs/$RUN_ID/tensorboard_server.log 2>&1"
 
-sleep 5
-curl -I --max-time 5 http://127.0.0.1:6006/
+sleep 8
+ss -ltn | grep ":$PORT" && echo TB_OK
 ```
 
 如果 `tmux has-session` 已成功，不要重复执行 `new-session`。TensorFlow 未安装的提示不影响
-PyTorch event 文件的标量曲线读取。
+PyTorch event 文件的标量曲线读取。长跑 run 的 event 文件会涨到数百 MB（100k 训练约
+640 MB），浏览器首次加载需要等一会儿，不是卡死。
 
 `last.pt` 每 50 step 更新一次，长期 `model_step_*.pt` 每 2000 step 保存一次；只有
 world rank 0 写这些文件。
@@ -386,8 +452,12 @@ world rank 0 写这些文件。
 - ONNX 不在训练中自动导出。选定 checkpoint 后在 GPU14 运行导出，结果写入
   `/data/ouqin/runs/RUN_ID/exported/`，包括 `*_g1.onnx` 和 `*_smpl.onnx`。
 
-当前16张卡都在训练，不要同时启动导出抢占显存。训练完成或释放一张 GPU 后，从本地登录
-GPU14 的 `ouqin` 账号：
+当前16张卡都在训练，不要同时启动导出抢占显存。4096 env 训练时每张 4090 占约 15 GiB、
+剩约 8.7 GiB，而 `num_envs=1` 的 Isaac Sim 实例峰值约 4~6 GiB——塞得下但没有余量。
+一旦导出进程 OOM，很可能把同卡上的训练 rank 一起带崩；16 路 DDP 死一个 rank 整个作业
+就退出，已训练的步数只能从最近的 `model_step_*.pt` 重来。**默认应等训练结束再导出。**
+
+训练完成或释放一张 GPU 后，从本地登录 GPU14 的 `ouqin` 账号：
 
 ```bash
 ssh -i ~/.ssh/id_ed25519_sonic_bumi -p 22115 ouqin@117.161.121.54
@@ -399,22 +469,38 @@ ssh -i ~/.ssh/id_ed25519_sonic_bumi -p 22115 ouqin@117.161.121.54
 ```bash
 cd /data/ouqin/sonic_bumi_full
 source .local/sonic_bumi_cluster.env
-RUN_ID=sonic_bumi3_16gpu_4096_scratch_100k_20260911_150534
-STEP=030000
+RUN_ID=sonic_bumi3_filtered_100k_20260924_2204
+STEP=100000
 CHECKPOINT=/data/ouqin/runs/$RUN_ID/model_step_$STEP.pt
 test -f "$CHECKPOINT"
 
 export OMNI_KIT_ACCEPT_EULA=YES
-export TMPDIR=/data/ouqin/runs/.tmp/ouqin/export
+export TMPDIR=/data/ouqin/runs/.tmp/ouqin/export_${RUN_ID}_${STEP}
 mkdir -p "$TMPDIR"
 CUDA_VISIBLE_DEVICES=0 "$REMOTE_PYTHON" gear_sonic/eval_agent_trl.py \
   checkpoint="$CHECKPOINT" \
   ++num_envs=1 ++headless=true ++export_onnx_only=true \
   ++manager_env.commands.motion.motion_lib_cfg.motion_file="$ROBOT_MOTION_DIR" \
-  ++manager_env.commands.motion.motion_lib_cfg.smpl_motion_file="$SMPL_MOTION_DIR"
+  ++manager_env.commands.motion.motion_lib_cfg.smpl_motion_file="$SMPL_MOTION_DIR" \
+  2>&1 | tee /data/ouqin/runs/$RUN_ID/export_$STEP.log
 
 ls -lh /data/ouqin/runs/$RUN_ID/exported/model_step_${STEP}_{g1,smpl}.onnx
 ```
+
+导出的三个必要条件，缺一个就会失败或静默不导出：
+
+- **`++` 前缀不能省。** `base_eval.yaml` 是严格 struct，`num_envs`/`headless`/
+  `export_onnx_only` 都不在它的默认字段里。写成 `num_envs=1` 会直接报
+  `Could not override 'num_envs' ... Key 'num_envs' is not in struct`，必须用 `++`
+  （或 `+`）追加。
+- **`TMPDIR` 必须指向 `$RUN_ROOT/.tmp/...`。** 不设时会去写机器全局的 `/tmp/isaaclab`，
+  该目录属于其他账号，必报 `PermissionError: [Errno 13]`。
+- **`num_envs` 必须是 1。** `eval_agent_trl.py` 的导出分支以 `config.num_envs == 1`
+  为前提，其他值不会触发导出，进程会走进正常评估流程。
+
+`*_g1.onnx` 文件名里的 `g1` 是 checkpoint 内部保留的 Robot Encoder 键名，**不代表
+Unitree G1 机器人**，BUMI3 的 Robot 路策略就是这个文件（输入 1170 维）；`*_smpl.onnx`
+是 SMPL 路（输入 1470 维）。
 
 ### 4.5 策略传回本地并部署
 
