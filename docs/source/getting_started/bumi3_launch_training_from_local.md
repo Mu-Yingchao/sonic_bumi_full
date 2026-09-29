@@ -7,21 +7,6 @@
 
 所有命令都在**本地开发机**执行，不需要先登录服务器。
 
-## 0. 控制链路不依赖 GitHub
-
-这一点先说清楚，避免误解：**控制服务器走的是纯 SSH，GitHub 只负责代码版本备份。**
-
-`ssh_node()` 是全部远程操作的唯一出口，就是 `ssh -i "$SSH_KEY" -p "$port" "$host"`；
-`verify_code()` 也只是本地 `git rev-parse HEAD` 与两台服务器各自 `git rev-parse HEAD`
-做字符串比较，不联网。GitHub 断网、账号失效都不影响启动、训练、取模型。
-
-真正的硬依赖只有三个：
-
-1. `.local/sonic_bumi_cluster.env`（被 Git 忽略，本地与两台服务器各一份，丢了就连不上）
-2. 该文件里 `SSH_KEY` 指向的私钥
-3. 两台服务器公网 SSH 可达，**且它们之间内网 `MASTER_ADDR` 互通**——16 路 DDP 的
-   NCCL rendezvous 和梯度同步走内网 `bond4` + IB，与公网、GitHub 都无关
-
 ## 1. 启动前四项检查
 
 ```bash
@@ -188,22 +173,7 @@ rendezvous，反过来则 rank 0 可能超时退出并留下 8 个占显存的�
 
 ## 6. 启动后必须验证的三件事
 
-### 6.1 数据集剔除是否生效（用 filtered 配置时）
-
-```bash
-ssh -i "$SSH_KEY" -p "$GPU14_PORT" "$GPU14_SSH" \
-  "grep 'Exact motion exclusion' $RUN_ROOT/$RUN_ID/node0.log | head -2"
-```
-
-应看到：
-
-```
-Exact motion exclusion: requested=84, matched=84, missing=0, remaining=97576
-```
-
-`matched=0` 说明清单没落到数据集上，配置没生效，应立即停掉重查。
-
-### 6.2 16 个 rank 全部在算
+### 6.1 16 个 rank 全部在算
 
 启动后约 4~8 分钟（Isaac Sim 初始化 + 动作加载较慢）：
 
@@ -217,7 +187,7 @@ GPU14 显示持续增长的 `Learning iteration`；错误区为空。
 `node1.log` 在动作加载结束后长期不增长是**正常的**——非 global-rank 0 不重复输出训练
 表格，不能据此判断 GPU15 没在训练。
 
-### 6.3 迭代真的在推进
+### 6.2 迭代真的在推进
 
 ```bash
 ssh -i "$SSH_KEY" -p "$GPU14_PORT" "$GPU14_SSH" \
@@ -317,78 +287,4 @@ bash tools_local/bumi_cluster.sh status
 ```
 
 checkpoint 每 2000 步落盘，停掉最多损失 2000 步。
-
-## 9. 已经踩过的坑
-
-| 现象 | 原因 | 处置 |
-|---|---|---|
-| tmux 会话 1 秒内消失、日志 0 字节 | 内层命令以 `exec` 开头，tmux 3.2a 上会静默失败 | 去掉 `exec`，见 commit `b0c9547` |
-| 训练跑完但配置覆盖没生效、日志无报错 | exp 配置漏写 `# @package _global_` | 见第 3 节，启动前做 Hydra 组装验证 |
-| 剔除清单不生效 | 启动器里有 `++...exclude_motion_keys=[]` 硬编码压掉了配置 | 已移除；新增字段前检查启动器 |
-| 迭代数只跑到 50000 就停 | `.local` 里缺 `TRAIN_ITERATIONS`，用了代码默认值 | 启动前确认该变量存在 |
-| smoke 却按全量规模启动 | `.local` 里的变量会覆盖命令行前置的同名环境变量 | 用专门的 `launch-smoke*` 入口，别手工拼环境变量 |
-| `PermissionError: [Errno 13]` | `TMPDIR` 未设，去写了属主不同的 `/tmp/isaaclab` | 启动器已自动设置；手工启动时必须自己设 |
-| rank 0 超时退出、GPU15 留 8 个僵尸进程 | 启动顺序反了，或端口 29517 被残留占用 | 先 rank 1 后 rank 0；启动前查端口 |
-| `fatal: 不能创建空的归档包` | `git bundle` 的范围末尾写成 SHA 而非分支名 | 用 `${SHA}..main` |
-| 训练中途整体退出，日志里是 `SignalException: ... got signal: 2` | **SIGINT**，有人 attach 到训练 tmux 会话按了 Ctrl+C | 见下方"区分中断与崩溃" |
-
-### 9.1 区分"被中断"与"真崩溃"
-
-长跑训练意外停止时，先看 `node0.log` 里的信号类型，不要一上来就当成 bug：
-
-| 日志特征 | 含义 | 起因 |
-|---|---|---|
-| `got signal: 2` | SIGINT | 有人在 tmux 会话里按了 Ctrl+C |
-| `got signal: 15` | SIGTERM | 被 `pkill`/`kill` 或 `tmux kill-session` 终止 |
-| `CUDA out of memory` | 显存不足 | 同卡上有别的进程，或 `num_envs` 过大 |
-| `Received a dump signal due to a collective timeout` | NCCL 集合通信超时 | **通常是结果不是原因**——另一台的 rank 先停了，本机等够 30 分钟后退出 |
-
-排查顺序：先看**两台机器各自日志的最后修改时间**。若 GPU14 停在 T、GPU15 停在 T+30min，
-说明是 GPU14 先出事、GPU15 只是被拖垮，应该只查 GPU14。再看中断前最后一个 iteration
-的指标是否正常——正常则排除训练发散，`free -g` 排除 OOM。
-
-2026-09-28 就发生过一次：`sonic_bumi3_filtered_100k_20260924_2204` 跑到 iteration
-69,008 时收到 SIGINT，前一轮 `Iteration time: 4.27s`、`ETA: 135872s` 一切正常，
-内存 503 G 只用了 15 G。GPU15 在 30 分钟后 NCCL 超时退出。结论是外部中断，不是故障。
-
-**防范**：查看训练日志用 `tail -f 日志文件`，**不要 `tmux attach` 到训练会话**。
-attach 后任何一次 Ctrl+C 都会直接杀掉整个 16 路作业。确需 attach 时用只读模式：
-
-```bash
-tmux attach -t sonic_${RUN_ID}_node0 -r
-```
-
-### 9.2 中断后续跑
-
-`last.pt` 每 50 步滚动更新，`model_step_*.pt` 每 2000 步固定落盘，所以损失通常很小。
-真正的续跑用 `resume=true`，它会恢复 optimizer、学习率状态、自适应采样统计以及
-`global_step`，从中断处接着数到目标迭代数：
-
-```bash
-RUN_ID=<被中断的 run>
-CKPT=$RUN_ROOT/$RUN_ID/last.pt     # 或用整数点 model_step_XXXXXX.pt 更保险
-```
-
-注意与 `launch-ground-finetune` 区分：后者用的是 `+resume=false`，**只加载网络权重**，
-optimizer 和迭代计数全部重置，属于"热启动新训练"而非续跑。
-
-## 10. 完整流程速查
-
-```bash
-cd /home/yingchaomu/下载/sonic_bumi_full
-source .local/sonic_bumi_cluster.env
-
-bash tools_local/bumi_cluster.sh status          # 1. 16 卡空闲？
-bash tools_local/bumi_cluster.sh verify-code     # 2. 三端同 SHA？
-# 3. 改过配置 → Hydra 组装验证（第 3 节）
-bash tools_local/bumi_cluster.sh launch-smoke-filtered smoke_$(date +%Y%m%d_%H%M)
-# 4. 等 2 分钟，确认 5 个 iteration、0 报错、会话自退、显存释放
-
-RUN_ID="sonic_bumi3_filtered_100k_$(date +%Y%m%d_%H%M)"
-bash tools_local/bumi_cluster.sh launch-train-filtered "$RUN_ID"   # 5. 正式启动
-
-# 6. 等 4~8 分钟
-ssh -i "$SSH_KEY" -p "$GPU14_PORT" "$GPU14_SSH" \
-  "grep 'Exact motion exclusion' $RUN_ROOT/$RUN_ID/node0.log | head -1"
-bash tools_local/bumi_cluster.sh training-status "$RUN_ID"
 ```
